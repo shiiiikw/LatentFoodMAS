@@ -1,0 +1,623 @@
+从 Introduction 写作到 WWW 审稿评分：单独对话记录
+
+范围：从用户要求撰写 Introduction 开始，到澄清与 LProp 为同期工作后的 WWW 模拟审稿讨论为止。
+按原对话顺序保留用户消息与助手正文，包括 Introduction、LaTeX 公式、方法解释和审稿分析；不包含工具调用、系统消息或界面状态。
+
+阅读提示：后续用户已明确，本项目与 LProp 是同期工作，面向独立 WWW 投稿，不将 LProp 设为必须超越的前作或必需性能基线。前面草稿中的“Building on … LProp”等表述保留作为历史记录，后文已纠正，不能直接作为最终论文定位。
+文献链接、引用键和评分为当时讨论内容，本次导出未重新核验；模拟评分不代表实际接收结果。
+
+==============================================================================
+第 1 条｜用户
+==============================================================================
+
+如果按照这个主线进行，能否按照我们定好的写作风格给我写一个introduction。一步一步把这个故事铺垫好，从大背景到中背景到小背景，再从gap到我们如何解决。
+
+==============================================================================
+第 2 条｜助手
+==============================================================================
+
+我建议这篇论文的 Introduction 围绕一条非常明确的逻辑展开：
+
+**LLM-based MAS 的角色分工 → 不同任务之间的 uncertainty 不能直接传递 → 校准的风险分数仍不足以指导下游行动 → latent communication 能保留更多信息，但不等于知道哪些信息对接收者重要 → 我们需要 receiver-conditioned uncertainty propagation → 利用这种传播指导针对性的 clarification。**
+
+这里最重要的是把 **Calibration、Latent Uncertainty 和 Clarification** 写成相互依赖的三个环节，而不是三个并列的创新点。
+
+我按照我们之前确定的重逻辑链写作标准，给出一版可以作为论文初稿的英文 Introduction。方法名称暂时使用描述性的 *Receiver-Conditioned Latent Uncertainty Propagation*，不急于确定缩写。
+
+## Introduction — Draft V1
+
+```latex
+\section{Introduction}
+\label{sec:introduction}
+
+Large language models (LLMs) are increasingly organized into
+multi-agent systems (MAS), where specialized agents collaborate
+to solve tasks that require different forms of reasoning,
+knowledge, and tool interaction. Rather than solving a problem
+independently, each agent produces intermediate judgments that
+subsequent agents use to complete their own subtasks. This
+division of labor enables complex workflows, but also creates
+dependencies between decisions: an uncertain judgment made by
+one agent may become an accepted premise for another, allowing
+errors to propagate across roles and influence the final
+outcome. Reliable collaboration therefore requires not only
+accurate intermediate predictions, but also a mechanism for
+communicating and updating the uncertainty associated with
+those predictions.
+
+However, uncertainty propagation becomes more complicated
+when agents perform heterogeneous tasks. A retrieval agent
+may be uncertain about the identity of a retrieved entity,
+while a reasoning agent may be uncertain about a logical
+inference, and a verification agent about the evidence
+supporting a claim. Their uncertainty estimates refer to
+different prediction events and need not carry the same
+implications for downstream decisions. Even when local error
+probabilities are well calibrated, the same uncertainty can
+have different consequences depending on the receiving agent's
+task. For example, uncertainty between two candidate entities
+may be irrelevant to a downstream question that admits the
+same answer under either interpretation, but critical to
+another question whose answer changes with the entity
+identity. Consequently, reliable propagation requires more
+than calibrating each agent's confidence independently:
+inherited uncertainty must be interpreted relative to the
+receiving task and the decisions that depend on it.
+
+Recent research has begun addressing uncertainty beyond
+isolated LLM responses. PropUQ-MAS models communication
+dependencies to combine local and inherited error risks,
+while CAGE-Cal studies how communication-induced dependencies
+affect confidence calibration in multi-agent predictions
+\citep{liu2026propuqmas,huang2026counterfactual}.
+These approaches establish the importance of propagation-aware
+reliability estimation and communication-dependent calibration.
+Yet a calibrated risk estimate does not necessarily identify
+which part of an inherited judgment is uncertain or how
+resolving that uncertainty would affect the receiver's
+decision. Two messages can have similar error probabilities
+while requiring different verification or clarification
+actions. More generally, recent work has shown that
+predicting failure risk and predicting the benefit of an
+intervention are distinct objectives
+\citep{zhang2026calibrationisnotcontrol}.
+Thus, propagating the degree of uncertainty alone does not
+provide sufficient information for determining how a
+receiving agent should respond to it.
+
+Preserving richer information across agent interfaces offers
+a possible way to address this limitation. Prior work on
+latent communication, including CIPHER, LatentMAS, and
+Interlat, demonstrates that continuous representations can
+support inter-agent communication beyond discrete textual
+messages
+\citep{phamCIPHER2024,pmlr-v306-zou26k,
+du-etal-2026-enabling}. In particular, Interlat learns
+receiver-side latent adaptation and uses task-oriented and
+uncertainty-aware objectives to preserve useful information
+during communication. These advances suggest that latent
+representations can retain information that may be lost when
+intermediate reasoning is compressed into a selected answer
+or confidence score. Nevertheless, preserving task-relevant
+information is not equivalent to identifying which inherited
+uncertainties matter for a particular receiving task, or
+which additional evidence would resolve them. Similarly,
+explicit uncertainty explanations can guide targeted
+reflection, as explored by AUQ
+\citep{zhang2026agenticuncertainty}, but their effectiveness
+depends on whether the communicated explanation preserves
+the distinctions needed by the downstream agent.
+The remaining question is therefore not simply how to
+transmit more information, but how to transform inherited
+uncertainty into information that supports the receiver's
+specific decisions.
+
+This distinction exposes two closely related requirements
+for uncertainty propagation in heterogeneous MAS. First,
+the receiving agent must translate uncertainty associated
+with an upstream prediction into uncertainty over its own
+possible outcomes. Such translation requires identifying
+which upstream alternatives affect the receiving task,
+rather than treating the sender's confidence as a
+task-independent measure of downstream reliability.
+Second, the receiving agent must determine whether and
+how the relevant uncertainty can be resolved. A low
+confidence score may indicate the need for intervention,
+but it cannot by itself distinguish whether the agent
+should clarify an ambiguous entity, verify conflicting
+evidence, or proceed because the unresolved alternatives
+lead to the same decision. Addressing these requirements
+calls for a representation that preserves candidate-specific
+uncertainty and a propagation mechanism that interprets
+this information in the context of the receiving task.
+
+To this end, we propose \textit{Receiver-Conditioned Latent
+Uncertainty Propagation}, a framework for communicating
+and utilizing uncertainty across role-specialized LLM
+agents. Building on the candidate-specific representations
+of Latent Uncertainty and the evidence-conditioned belief
+revision of LProp, our framework extends uncertainty
+propagation to agents with heterogeneous prediction
+objectives. At each handoff, the sending agent provides
+an uncertainty-bearing latent representation associated
+with its candidate interpretations and available evidence.
+A receiver-conditioned propagation module then relates
+these alternatives to the receiving agent's task, producing
+task-specific beliefs and calibrated estimates of downstream
+reliability. Rather than using these estimates only to
+monitor failure risk, we further introduce a
+clarification mechanism that evaluates which unresolved
+candidate distinctions are relevant to the receiver and
+selects questions according to their expected contribution
+to the downstream decision. Once additional evidence is
+obtained, the inherited beliefs are revised to reflect
+the new information.
+
+We investigate whether this formulation enables uncertainty
+to support reliable communication and targeted intervention
+across heterogeneous agent roles. Our evaluation separates
+three questions: whether receiver-conditioned propagation
+improves calibration of downstream outcomes, whether
+candidate-specific latent information contributes beyond
+calibrated scalar confidence and explicit textual
+explanations, and whether this information leads to more
+effective clarification under comparable interaction
+budgets. By comparing against uncertainty propagation
+methods, general latent communication, and intervention-aware
+controls, we aim to isolate the contributions of
+task-conditioned uncertainty interpretation and latent
+information to multi-agent decision making.
+```
+
+**引用说明：** `du-etal-2026-enabling`、`pmlr-v306-zou26k` 和 `acikgoz-etal-2026-mac` 等有正式出版记录；部分 arXiv 论文使用了暂定 BibTeX key，需要与最终 `references.bib` 对齐。这里没有加入尚不存在的实验结果。
+
+---
+
+## 我为什么采用这条逻辑链？
+
+我认为这版最重要的不是方法描述，而是前三个递进关系。
+
+### 第一层：从 MAS 的协作问题，引出 uncertainty propagation
+
+第一段不急着谈 latent、calibration 或 clarification。
+
+先建立一个必要事实：
+
+**MAS 的核心特点不是有多个 LLM，而是一个 Agent 的输出会成为其他 Agent 的输入。**
+
+因此，不确定性不再只是局部预测的属性，还会影响后续判断。
+
+这是整个问题成立的起点。
+
+### 第二层：从普通 propagation，引出 heterogeneous task calibration
+
+第二段是这篇论文区别于原有 LProp 的关键。
+
+我刻意没有写：
+
+> Different agents have different uncertainty scales, so we need to normalize their confidence scores.
+
+因为这很容易让审稿人认为我们只是在做 group-wise calibration 或 temperature scaling。
+
+相反，我写的是：
+
+> Even when local error probabilities are well calibrated, the same uncertainty can have different consequences depending on the receiving agent's task.
+
+**核心问题不是把不同角色的分数调到同一个刻度，而是确定每个分数对应什么事件，以及该事件怎样影响接收者。**
+
+这使 calibration 自然过渡到 receiver-conditioned uncertainty propagation。
+
+而且这个区别可以被实验验证：同一上游信息传给不同接收角色，观察各自的预测目标、可靠性与后续决策是否改变。
+
+### 第三层：从 calibration，引出 latent uncertainty 的必要性
+
+第三段首先承认 PropUQ-MAS 和 CAGE-Cal 已经研究了传播和校准。不能声称 MAS uncertainty propagation 尚无人研究。([arxiv.org](https://arxiv.org/html/2608.22130v3))
+
+然后指出一个更窄的问题：
+
+**即使知道接收者的最终失败风险，也不一定知道该解决哪一个上游疑点。**
+
+这是 calibration 与 clarification 之间的衔接。
+
+而且《Calibration Is Not Control》已经证明失败风险与干预价值不能混为一谈，所以我们不能把这个区别本身作为首次提出的创新。([arxiv.org](https://arxiv.org/html/2606.21399v2))
+
+由此才有第四段：
+
+latent communication 提供更丰富的中间信息，但这种信息是否包含**有助于接收者定位澄清目标的内容**，仍然需要验证。
+
+这里我特意承认 Interlat 使用了 receiver-side adapter、下游任务目标和 uncertainty-weighted compression。不能把它简单描述成一个不考虑 uncertainty 或任务的通信方法。([arxiv.org](https://arxiv.org/html/2511.09149v5))
+
+我们尝试建立的区别是：
+
+**Interlat 关注如何有效传递并使用 latent information；我们关注如何利用其中与不确定性有关的候选差异，校准接收者的判断，并决定下一步应该澄清什么。**
+
+这是目前最有希望的定位，但还需要强对照实验来证实。
+
+---
+
+## 我认为还有两处需要在实验之后再决定最终措辞
+
+**第一，latent 是否真的优于充分的文本解释。**
+
+目前 Introduction 中使用的是：
+
+> latent representations can retain information that may be lost...
+
+而不是：
+
+> latent representations preserve information that text cannot represent.
+
+这一区别非常重要。
+
+如果结构化候选、概率和明确的文本解释已经足够，latent 的独立作用就会受到挑战。
+
+因此，不能仅用 latent 对比 scalar confidence 来支持这一段的主张。
+
+**第二，clarification 是否真正改善最终结果。**
+
+不能把“预测出更相关的澄清问题”直接等同于更高的任务成功率。
+
+这也是为什么最后一段把三个评价目标分开：下游风险校准、latent 的额外信息价值，以及主动澄清的实际收益。
+
+如果前两项成立但第三项不成立，我们仍然可以讨论 receiver-conditioned propagation，但不能将有效 clarification 作为已经验证的贡献。
+
+---
+
+## 下一版 Introduction 最值得加强的部分
+
+这一版已经形成了从大背景到具体方法的完整逻辑。不过，**目前最关键、也最需要实验证据支持的段落是第五段**：
+
+> The receiving agent must translate uncertainty associated with an upstream prediction into uncertainty over its own possible outcomes.
+
+这是整篇论文的技术中心。
+
+接下来最值得做的是把它形式化，明确区分：
+
+\[
+\underbrace{P(E_i\mid h_i)}_{\text{Sender-local risk}}
+\]
+
+\[
+\underbrace{P(E_j\mid h_j,Z_i,T_j)}_{\text{Receiver-conditioned risk}}
+\]
+
+\[
+\underbrace{\mathbb E[\Delta U_j\mid q,h_j,Z_i,T_j]}_{\text{Clarification value}}
+\]
+
+其中，\(E_i\) 和 \(E_j\) 分别对应发送者与接收者明确定义的错误事件，\(T_j\) 是接收者的任务，\(Z_i\) 是继承的 latent representation。接收者风险应进一步明确对应何种继续执行策略，澄清价值也必须包含问题成本。
+
+**三个量不是同一个 uncertainty score 的不同缩放版本。**
+
+第一个描述上游输出的可靠性；第二个描述该信息在接收任务中的风险；第三个描述采取具体行动的预期收益。
+
+这也能让三个方法组件形成清晰关系：
+
+**Latent Uncertainty 保留候选相关信息 → Receiver-Conditioned Propagation 将其解释为下游任务风险 → Clarification 利用这些信息选择有价值的干预。**
+
+我认为这就是目前最值得保留的论文核心故事。它与原有 LProp 有明确的延续关系，也比泛泛的 *Role-Aware Calibration + Latent Communication* 更容易建立独立的研究问题。
+
+==============================================================================
+第 3 条｜用户
+==============================================================================
+
+这里我们的方法是candidate latent uncertainty吗？就是传递每一个候选的uncertainty？
+
+==============================================================================
+第 4 条｜助手
+==============================================================================
+
+**是的，我们的方法可以使用 Candidate-Specific Latent Uncertainty，但需要明确：我们不是简单地为每个候选答案传递一个 uncertainty score，而是传递每个候选对应的 latent information，以及候选之间的概率分布。**
+
+而且，这实际上是我们之前 **LProp 已经具备的基础**。新研究的重点不应该是重新提出 candidate-level latent uncertainty，而应该是研究它如何在不同角色、不同任务的 Agent 之间传播。
+
+### 1. 我们具体传递什么？
+
+假设上游 Agent 有三个候选答案：
+
+\[
+\mathcal A=\{a_1,a_2,a_3\}
+\]
+
+我们可以构造：
+
+\[
+Z_i=\{(a_k,p_k,z_k)\}_{k=1}^{K}
+\]
+
+其中：
+
+- \(a_k\)：候选答案或候选解释。
+- \(p_k\)：当前证据下该候选的支持概率。
+- \(z_k\)：与该候选相关的 latent representation，保留其证据、语义和推理过程中可能对下游有用的信息。
+
+**注意，\(z_k\) 不是候选答案的 uncertainty score。**
+
+例如：
+
+| Candidate | Probability | Latent Information |
+|---|---:|---|
+| Entity A | 0.5 | 与来源 X 相关，可能存在同名实体混淆 |
+| Entity B | 0.3 | 与来源 Y 相关，证据较完整 |
+| Entity C | 0.2 | 与来源 Z 相关，但时间信息不一致 |
+
+表中的 latent information 是概念性描述。实际 \(z_k\) 是连续向量，不代表我们已经证明它能够编码或准确解码这些信息。
+
+因此，**uncertainty 既体现在候选分布中，也可能体现在候选相关的 latent 内容中，而不是每个候选拥有一个独立的 uncertainty 数值。**
+
+这与我们原来的 LProp 是一致的。
+
+### 2. 那么新方法究竟增加什么？
+
+我认为真正的创新候选是：
+
+**Receiver-Conditioned Interpretation of Candidate-Specific Latent Uncertainty**
+
+也就是：
+
+> 同样的候选分布和 latent information，传递给执行不同任务的 Agent 后，应当产生不同的下游不确定性判断。
+
+例如，上游 Agent 不确定一个事件发生于 1998 年还是 2001 年：
+
+\[
+P(1998)=0.5,\qquad P(2001)=0.5
+\]
+
+对于下游 Agent A：
+
+> Did the event happen before 2000?
+
+这个不确定性直接决定最终答案。
+
+对于下游 Agent B：
+
+> Did the event happen before 2010?
+
+两种候选都对应 Yes，因此这项上游不确定性不会改变当前判断。
+
+**同一份 latent uncertainty，对不同接收任务具有不同的决策意义。**
+
+所以，我们不应该直接传播一个固定的风险值，而应该让 Receiver 根据自身任务解释候选及其 latent：
+
+\[
+P_j(y\mid T_j)
+=
+\sum_k p_k
+P_\theta(y\mid T_j,a_k,z_k)
+\]
+
+这里 \(T_j\) 是接收者的任务，\(y\) 是接收者自己的候选结果。这个公式是一个候选条件化的概率模型示意，并非新的概率理论。
+
+关键在于，上游和下游的答案空间可以完全不同。
+
+### 3. Clarification 在哪里发挥作用？
+
+这是我认为可以进一步形成贡献的部分。
+
+Receiver 不仅要知道自己的判断有多不确定，还需要知道：
+
+**到底应该澄清哪个上游候选之间的区别，才能改善自己的决策？**
+
+例如：
+
+- Agent A 需要知道事件究竟发生在 2000 年之前还是之后。
+- Agent B 不需要进一步澄清年份，因为两种候选都支持同一个答案。
+
+所以 clarification 并不是简单地向 uncertainty 最大的 Agent 发问。
+
+而是：
+
+\[
+q^*
+=
+\arg\max_q
+\left[
+\mathbb E[\Delta U_j\mid q,Z_i,T_j]
+-C(q)
+\right]
+\]
+
+这里的 VOI 思路本身已有先例。我们需要验证的是：**candidate-specific latent 是否能够帮助接收者识别哪些候选差异值得澄清。**
+
+### 4. 与原来 LProp 的区别
+
+| | 原来的 LProp | 新的 MAS 方法 |
+|---|---|---|
+| Latent representation | Candidate-specific | 继续使用 Candidate-specific |
+| Propagation | 根据新证据更新答案分布 | 根据 Receiver 任务解释继承的候选 |
+| Calibration | 估计和更新特定答案的可靠性 | 明确接收者自己的错误事件并校准风险 |
+| Agent roles | Source–Receiver handoff | 不同角色、不同子任务 |
+| Clarification | 不是核心研究目标 | 根据候选差异选择澄清问题 |
+| 核心贡献 | Evidence-conditioned belief revision | **Receiver-conditioned uncertainty interpretation and clarification** |
+
+因此，我建议**不要把新方法直接命名为 Candidate Latent Uncertainty**。
+
+因为这会让审稿人觉得，我们只是将 LProp 的 candidate-indexed carrier 搬到 MAS 中。
+
+更准确的研究定位应该是：
+
+**Receiver-Conditioned Latent Uncertainty Propagation**
+
+其中 Candidate-Specific Latent Uncertainty 是信息表示基础，而 Receiver-Conditioned Propagation 才是我们需要研究的新机制。
+
+而且，我们最终还要证明：在接收者已经获得候选、概率和充分的文本解释后，latent 内容仍然能帮助它作出更好的澄清选择。否则，新方法的价值可能只来自候选分布，而不是 latent。
+
+**一句话概括：我们传递的是每个候选的 latent representation 和候选分布，但真正研究的是不同 Agent 应该如何解释这些信息，并判断哪些不确定性值得澄清。**
+
+==============================================================================
+第 5 条｜用户
+==============================================================================
+
+这个方法如果你作为审稿人来说你会觉得怎么样？如果实验结果都比较理想你会给出什么分数
+
+==============================================================================
+第 6 条｜用户
+==============================================================================
+
+这跟LProp是同期工作，不需要跟LProp比较。这是WWW的投稿
+
+==============================================================================
+第 7 条｜助手
+==============================================================================
+
+**那评估口径应该修正：这是一篇独立的 WWW 投稿，不是“LProp 的后续扩展”；我不会把“必须比 LProp 更好”作为审稿要求。** 前面 Introduction 中的 *“Building on … LProp”* 也不适合目前的定位，应当直接介绍本篇方法。
+
+回答你上一条问题：**假设关键实验结果理想、对照公平，而且能够支撑我们提出的机制，我会倾向给 Accept，支持接收。用我个人的五分制预评分表达，大约是 4/5。** 这不是 WWW 官方评分量表，也不是接收概率。
+
+但这个接收判断有一个明确依据：**论文需要证明“接收者任务条件化的候选 latent uncertainty，确实改善了具体澄清选择”，而不只是最终准确率比几个基线高。**
+
+## 一、作为 WWW 审稿人，我会怎样理解这篇论文？
+
+我希望读到的核心贡献是：
+
+> **在任务分工不同的多智能体系统中，上游不确定性不能直接等同于下游决策风险。本文通过候选相关的 latent 表示保留上游解释差异，再根据接收者任务判断哪些差异值得解决，并以此指导跨 agent 澄清。**
+
+我认为这能够形成一个完整的问题，而不是三个模块的简单组合：
+
+**上游存在多个解释 → 接收者只关心其中一部分区别 → 需要保留并识别这些区别 → 才能判断向谁问什么 → 新证据再用于修订接收者的判断。**
+
+其中，我最看重的是两点。
+
+**第一，传播的对象不再只是一个固定风险分数，而是接收者需要解释的候选结构。**
+
+“上游有多大概率出错”与“上游的哪些可能错误会改变我的结果”不是同一个问题。这使角色分工成为方法的必要条件，而不是在 prompt 中添加几个角色名字。
+
+**第二，latent 的价值有了可以检验的行动终点。**
+
+不是笼统声称“hidden states 信息丰富”，而是检查它能否让接收者区分：
+
+> 需要澄清实体身份，还是需要澄清时间定义？
+> 应该回问上游，还是现有候选已经足以支持当前判断？
+
+如果这两点都有充分证据，我会认为论文提供了值得发表的新知识，而不要求你再发明一套新的概率理论。WWW 的官方评价本来就综合考虑原创性、技术价值、影响、执行质量与可复现性，而不只评价公式是否全新。([The Web Conference 2027](https://www2027.thewebconf.org/research-track-papers/))
+
+## 二、外部相关工作仍然构成哪些真正的技术门槛？
+
+不需要强制比较 LProp，并不意味着可以跳过最直接的外部工作。但这些对照也不意味着必须逐个重新实现一套庞大系统；应当围绕你的具体主张设置公平的比较。
+
+| 外部工作 | 已经覆盖的能力 | 我会要求本篇进一步证明什么 |
+|---|---|---|
+| **LatentMAS** | 不同角色通过 latent thoughts 和工作记忆协作 | 不只是 latent 协作更强，而是候选对应内容支持了更具体的澄清 |
+| **Interlat** | 接收端适配、任务导向压缩、不确定性加权的行为保持 | 相同接收者和澄清训练下，候选相关表示是否仍有额外作用 |
+| **PropUQ-MAS** | 将局部风险与上游继承风险沿通信结构传播 | 整体风险之外，哪些候选区别影响具体接收任务 |
+| **CAGE-Cal** | 考虑通信依赖进行多 agent confidence calibration | 不同子任务之间的风险解释，而不只是最终群体预测的校准 |
+| **Calibration Is Not Control** | 区分失败概率与干预价值，并学习干预决策 | 哪种继承信息有助于选择具体澄清，而不只是决定是否干预 |
+
+LatentMAS 已经包含顺序角色和领域专家角色，因此“不同角色通过 latent 协作”不能单独算区别。([arXiv](https://arxiv.org/html/2511.20639v4)) Interlat 更不能被描述成“不考虑接收者任务或 uncertainty”：它明确使用了任务损失及不确定性加权的压缩目标。([arxiv.org](https://arxiv.org/html/2511.09149v5))
+
+同样，风险传播和通信依赖校准分别已有 PropUQ-MAS 与 CAGE-Cal；我们应当准确区分它们的目标，而不是声称此前无人考虑这些问题。([arXiv](https://arxiv.org/html/2608.22130v1)) 风险与干预收益的区别也已有直接研究，因此它应当是我们的设计依据，而不是首次提出的发现。([arXiv](https://arxiv.org/html/2606.21399v2))
+
+**在这些先例之上，我仍然认为你的方案有接收空间。** 我会把潜在独特性定位在：
+
+> **候选对应的信息组织，如何与接收者任务一起，决定需要澄清的具体内容。**
+
+这比“加一个 calibration head”或“传递更多 latent”更有辨识度。
+
+## 三、哪些理想实验结果会让我实际投接收票？
+
+我不需要所有指标都第一，也不会要求解决全部 MAS 泛化问题。**我会要求三个核心主张各自有证据。**
+
+### 1. Receiver conditioning 确实有效，而不只是角色标签有效
+
+我希望看到：**对于相同的上游消息、候选与概率，不同的实际接收任务会需要不同的澄清；我们的方法能够识别这种变化。**
+
+例如，同一个年份分歧，对一个接收任务是关键条件，对另一个任务无关紧要。随后还需要在真实任务依赖中验证，而不只停留在这个人工例子上。
+
+对应的消融应该区分：
+
+- 只用发送者信息；
+- 加接收者角色名称；
+- 加接收者的实际任务与当前判断状态。
+
+如果只有角色名称就能解释全部收益，那么我会降低对“跨任务不确定性解释”这一主张的认可。反之，如果模型能够适应未见的任务组合，而不是记住某个角色通常风险更高，这会明显增强论文。
+
+### 2. Candidate-specific latent 确实提供额外信息，而不只是候选更多
+
+这是我认为**最重要的接收条件**。
+
+接收者已经看到：
+
+\[
+\text{候选内容＋概率＋充分的文本解释／证据摘要}
+\]
+
+之后，加入候选对应 latent 是否仍然改善澄清？
+
+我会尤其看重两种比较：
+
+**与丰富文本比较。** 避免仅用一个 confidence score 作为对照，制造 latent 看起来特别有用的结果。
+
+**与通用 latent 比较。** 使用相同容量、相近通信预算、相同训练目标的通用 hidden-state 表示，检查收益是否真的来自候选对应结构。
+
+如果你的方法在这两类对照下都有稳定收益，我就有理由相信：
+
+> **不是“多给了一些信息就更好”，而是“这些信息怎样对应候选，并被接收者解释”具有独立作用。**
+
+但这里不需要证明 latent 在所有预算下都胜过任意长度的文本。你可以提出有边界的结论，例如：在合理的通信与计算预算下，latent 提供更好的质量—成本权衡。关键是把文本、latent 的生成和处理成本都算进去。
+
+### 3. 更好的澄清选择确实改善任务，而不只是问题看起来更相关
+
+我希望看到的是：
+
+**相同交互预算下，最终结果更可靠；或者达到相同结果质量时，需要更少的澄清和计算。**
+
+而不是只看到：
+
+> 我们的问题相关性评分更高。
+
+也不是：
+
+> 我们问得更多，因此准确率提高。
+
+尤其应当同时报告：原本错误的判断得到多少恢复，原本正确的判断又被澄清后的更新破坏了多少。上游回答也不能是永远正确的 oracle，必须允许它根据现有证据表示无法确认。
+
+**三个结果串起来，我就愿意给 4/5：接收者任务改变信息需求，candidate latent 帮助识别这种需求，识别改善又转化成实际任务收益。**
+
+## 四、为什么我会给 4，而不是直接给 5？
+
+即使结果理想，我也不会因为方法包含 latent、calibration 和 clarification，就给最高分。
+
+我仍会保留两个技术上的判断。
+
+**一是，数学框架可能主要建立在成熟的条件概率、校准和信息价值思想上。** 这不妨碍接收，但论文的价值主要来自明确的问题、表示机制和有说服力的实验，而不一定是基础性的算法突破。
+
+**二是，latent 的适用范围需要诚实界定。** 方法依赖内部表示访问；不同模型之间的对齐、候选遗漏，以及 latent 是否传递了与 uncertainty 无关的额外信息，都需要说明。它们是方法边界，不是必须在本篇全部解决的任务。
+
+因此，我的评分区分会是：
+
+| 最终证据 | 我的模拟推荐 |
+|---|---|
+| 只优于 scalar confidence 和简单 text MAS | **Borderline／Weak Reject** |
+| 最终效果好，但 latent、接收者条件化和更多训练的作用没有分开 | **Weak Accept 或 Borderline** |
+| 三项核心主张都有强对照支持，并且 Web 任务表现可靠 | **Accept；个人预评分约 4/5** |
+| 在上述基础上，还给出特别清楚、可迁移的机制发现和广泛验证 | **Strong Accept 才有依据** |
+
+**不会要求你为了从 4 分冲到 5 分，再不断往方法里加模块。**
+
+## 五、WWW 投稿还需要一个明确的场景落点
+
+这是与 LProp 是否同期无关、但与 WWW 接收直接相关的条件。
+
+WWW 当前征稿要求论文回答明确的 Web 研究问题；仅仅使用一个来自 Web 的数据集或 API，并不足以证明属于会议范围。([The Web Conference 2027](https://www2027.thewebconf.org/research-track-papers/))
+
+我建议把主实验和 Introduction 落在：
+
+> **多 agent Web 信息检索与证据综合中，检索、解释、推理和验证角色如何传递不确定性，并通过针对性回问避免错误前提进入最终答案。**
+
+这不是要求你重新做网站、重新找一个大型应用领域，也不是恢复此前的项目。你已有的多跳检索与证据推理基础可以继续利用，但应让**检索证据、角色依赖和澄清行为真正成为任务的一部分**。
+
+如果最终只有不同 persona 对同一道封闭式选择题轮流作答，即使数值很好，我仍会担心“异质任务”与“Web 关联”都没有真正被验证。
+
+---
+
+## 最终审稿意见
+
+在你设定的理想实验前提下，我会给出这样的意见：
+
+> **Recommendation: Accept.**
+> 本文研究了多角色协作中一个明确的问题：发送者的不确定性并不能直接确定其对接收者任务的影响。方法通过候选对应的 latent 信息和接收者条件化传播，将上游解释差异转化为具体的澄清需求。若实验充分证明其优势超越丰富文本表示、通用 latent communication 及同等能力的干预控制器，并且改善了 Web 信息获取任务的质量—成本权衡，我认为该工作具有足够的技术与实证价值，支持接收。
+
+**所以，我的答案是：不把 LProp 作为必须超越的前作后，这个方案完全可以作为独立的 WWW 论文评估；关键实验都理想时，我会给约 4/5、支持接收，而不是预设它只能是边缘稿。**
+
+另外，同期工作不必被强制设为性能基线，但两篇稿件仍需有各自独立、清楚的贡献，避免实质重复；这与是否做 LProp 对照是两回事。WWW 的原创性与并行投稿政策仍然适用。([The Web Conference 2027](https://www2027.thewebconf.org/research-track-papers/))
+
