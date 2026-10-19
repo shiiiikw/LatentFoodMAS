@@ -178,12 +178,13 @@ class RoundRobinMenuController(Controller):
 
 
 class ForcedController(Controller):
-    """Branch executor: forced first decision, then pi_0 for the rest of the trajectory."""
+    """Branch executor: forced first decision, then a continuation policy (pi_0 by default; the fixed-order rule for the
+    v6 budget menu, so that 'ask q' means 'ask q and keep following the default rule', and 'commit' means 'stop asking now')."""
     name = "forced_then_pi0"
 
-    def __init__(self, forced: Decision, seed: int):
+    def __init__(self, forced: Decision, seed: int, inner: "Controller | None" = None):
         self.forced = forced
-        self.inner = Pi0Controller(seed)
+        self.inner = inner if inner is not None else Pi0Controller(seed)
         self.used = False
 
     def decide(self, ctx):

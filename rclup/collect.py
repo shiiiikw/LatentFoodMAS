@@ -50,7 +50,9 @@ class Collector:
 
     def _branch(self, env_prefix, wf_prefix, snapshot: dict, forced: Decision, seed: int) -> dict:
         env = env_prefix.fork()
-        wf = wf_prefix.fork(ForcedController(forced, seed), seed=seed)
+        from .workflow import FixedOrderController
+        inner = FixedOrderController() if getattr(self, "variant", "") == "v6" else None
+        wf = wf_prefix.fork(ForcedController(forced, seed, inner), seed=seed)
         resume = {"st": copy.deepcopy(snapshot["st"]), "menu": snapshot["menu"], "forced": forced, "inv": snapshot["inv"]}
         if self.dataset == "hoosier":
             resume["pinv"] = snapshot["pinv"]
