@@ -496,6 +496,7 @@ class HoosierWorkflow(Workflow):
             found["zipcodes"] = zips
         if not found:
             cities = sorted({c for c in self.known_cities if len(c) > 3 and _re.search(r"\b" + _re.escape(c.lower()) + r"\b", replies_text)})
+            cities = [c for c in cities if not any(o != c and c in o for o in cities)]   # longest match: 'North Vernon' beats 'Vernon'
             if len(cities) == 1:
                 found["cities"] = cities
         return found or None
@@ -1189,6 +1190,17 @@ class HoosierWorkflow(Workflow):
                     continue
                 if f == "location" and isinstance(norm, dict) and norm.get("counties"):
                     norm["counties"] = [c.upper().replace(" COUNTY", "").strip() for c in norm["counties"]]
+                if f == "location" and isinstance(norm, dict):
+                    # every location literal must appear in the person's reply (no ZIP/city/county from model knowledge)
+                    low = reply.lower()
+                    grounded = {k: [v for v in vals if re.search(r"\b" + re.escape(str(v).lower()) + r"\b", low)] for k, vals in norm.items()}
+                    grounded = {k: v for k, v in grounded.items() if v}
+                    if grounded != norm:
+                        self.trace.add("fallback_location_ungrounded", need_id=n["need_id"], proposed=norm, kept=grounded)
+                        if not grounded:
+                            adjustable.append((n["need_id"], f))   # the person said they can move but named nothing usable: ask which place
+                            continue
+                        norm = grounded
                 if f == "schedule" and isinstance(norm, dict) and norm.get("day"):
                     days = [d for d, pats in self.VALUE_LITERALS["day"].items() if any(re.search(p, reply.lower()) for p in pats)]
                     if norm["day"] not in days:
