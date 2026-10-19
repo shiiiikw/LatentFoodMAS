@@ -276,13 +276,17 @@ class Workflow:
         spec = self.roles[role]
         version = self.next_version(role)
         inv_id = f"{role}#{version}"
-        samples = self.bb.propose(messages, s=S_DRAWS, max_tokens=PROPOSAL_MAX_TOKENS, seed=self.seed * 1000 + version,
-                                 tools=tools, purpose=f"{self.dataset}:{role}")
+        s_draws = getattr(self, "s_draws", S_DRAWS)   # 0: greedy-only handoff (plain message-passing baselines)
+        if s_draws == 0:
+            samples = self.bb.chat(messages, n=1, temperature=0.0, max_tokens=PROPOSAL_MAX_TOKENS, tools=tools, purpose=f"{self.dataset}:{role}:greedy")
+        else:
+            samples = self.bb.propose(messages, s=s_draws, max_tokens=PROPOSAL_MAX_TOKENS, seed=self.seed * 1000 + version,
+                                      tools=tools, purpose=f"{self.dataset}:{role}")
         packet = build_packet(inv_id, version, role, samples, spec.parse, spec.canon, spec.render,
                               ancestors=ancestors, sources=sources, unresolved_text=unresolved_text)
         if not any(not c.is_unresolved for c in packet.candidates):
             # All draws invalid: one retry with a different seed (logged); otherwise fail the invocation.
-            samples = self.bb.propose(messages, s=S_DRAWS, max_tokens=PROPOSAL_MAX_TOKENS, seed=self.seed * 1000 + version + 500,
+            samples = self.bb.propose(messages, s=max(s_draws, 1), max_tokens=PROPOSAL_MAX_TOKENS, seed=self.seed * 1000 + version + 500,
                                      tools=tools, purpose=f"{self.dataset}:{role}:retry")
             packet = build_packet(inv_id, version, role, samples, spec.parse, spec.canon, spec.render,
                                   ancestors=ancestors, sources=sources, unresolved_text=unresolved_text)
@@ -391,7 +395,7 @@ class HoosierWorkflow(Workflow):
     def normalize_contradiction(self, text: str) -> str:
         """Task module: the benchmark's self-contradictory user states the real fact and denies it in one sentence
         ('X works for me, but I cannot do X'); the denial clause is dropped so every agent reads the stated fact."""
-        return self.DENIAL_RE.sub("", text)
+        return self.DENIAL_RE.sub("", text) if getattr(self, "contradiction_normalizer", True) else text
 
     def _conversation_text(self, env) -> str:
         lines, k = [], 0
@@ -1337,7 +1341,7 @@ class HoosierWorkflow(Workflow):
                 # unmatched needs: clarification rounds (one question covering every unmatched need) until something
                 # changes or no relaxation is left; the repaired packet is re-planned without re-sampling the intake
                 changed = False
-                while empty and env.turns_left > 2 and not changed and self.fallback_clarification:
+                while empty and env.turns_left > 2 and not changed and self.fallback_clarification and getattr(self, "combined_fallback", True):
                     if not self.fallback_round(env, inv, empty, diagnosis, st):
                         break
                     changed = True

@@ -82,20 +82,20 @@ class VLLMClient:
         from transformers import AutoTokenizer  # eager: lazy imports race across threads
         self._tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR, local_files_only=True)
 
-    def render(self, messages: list[dict], tools=None) -> str:
+    def render(self, messages: list[dict], tools=None, thinking: bool = False) -> str:
         """Client-side chat-template rendering (identical to the HF encoder's rendering)."""
         if self._tokenizer is None:
             from transformers import AutoTokenizer
             self._tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR, local_files_only=True)
-        kwargs = {"tokenize": False, "add_generation_prompt": True, "enable_thinking": False}
+        kwargs = {"tokenize": False, "add_generation_prompt": True, "enable_thinking": thinking}
         if tools:
             kwargs["tools"] = tools
         return self._tokenizer.apply_chat_template(messages, **kwargs)
 
     def chat(self, messages: list[dict], *, n: int = 1, temperature: float = 0.0, top_p: float = 1.0,
              max_tokens: int = 512, seed: int | None = None, tools: list[dict] | None = None,
-             purpose: str = "gen", stop: list[str] | None = None) -> list[Sample]:
-        prompt = self.render(messages, tools)
+             purpose: str = "gen", stop: list[str] | None = None, thinking: bool = False) -> list[Sample]:
+        prompt = self.render(messages, tools, thinking=thinking)
         kwargs = dict(model=self.model, prompt=prompt, n=n, temperature=temperature, top_p=top_p,
                       max_tokens=max_tokens, logprobs=1, seed=seed, extra_body={"skip_special_tokens": True})
         if stop:

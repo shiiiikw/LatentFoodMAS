@@ -12,6 +12,18 @@
 | v5 without fallback clarification (ablation) | 0.391 (n=192) | 0.383 (n=240) | 0.354 (n=48) |
 | **v5 full system** | 0.594 (n=192) | 0.571 (n=240) | 0.479 (n=48) |
 
+## HoosierHelp — related-work style baselines (same Qwen3-8B, same simulated user, same turn cap; errors count as failures)
+
+| system | 4 behaviors (192) | all 5 (240) | self-contradictory (48) | questions to person (avg) |
+|---|---|---|---|---|
+| single agent, official prompt, direct | 0.000 (n=192) | 0.000 (n=240) | 0.000 (n=48) | 0.13 |
+| single agent, official prompt, step-by-step (thinking) | 0.073 (n=192) | 0.067 (n=240) | 0.042 (n=48) | 0.47 |
+| plain role chain (one greedy handoff) | 0.359 (n=192) | 0.333 (n=240) | 0.229 (n=48) | 3.55 |
+| 9-way majority-vote handoff | 0.344 (n=192) | 0.338 (n=240) | 0.312 (n=48) | 3.53 |
+| confidence handoff (uncertainty propagation) | 0.323 (n=192) | 0.317 (n=240) | 0.292 (n=48) | 3.55 |
+| **ours: v5 text controller** | 0.594 (n=192) | 0.571 (n=240) | 0.479 (n=48) | 3.94 |
+| **ours: v5 + learned rich-text controller** | 0.615 (n=192) | 0.583 (n=240) | 0.458 (n=48) | 3.99 |
+
 ## HoosierHelp — clarification controllers on the v5 workflow (paired vs. v5 text controller)
 
 | controller | 4 behaviors | Δ vs no-ask [95% CI] | all 5 | Δ all | asks to person |
@@ -22,6 +34,17 @@
 | fixed field order | 0.609 (n=192) | +0.016 [-0.031, +0.062] | 0.571 (n=240) | +0.000 [-0.042, +0.042] | 86 |
 | decision-relevance VOI (deterministic) | 0.604 (n=192) | +0.010 [-0.031, +0.052] | 0.583 (n=240) | +0.013 [-0.025, +0.050] | 32 |
 | learned rich-text controller (v5 labels) | 0.615 (n=192) | +0.021 [-0.016, +0.062] | 0.583 (n=240) | +0.013 [-0.021, +0.046] | 17 |
+|   ablation: no dependency features | 0.625 (n=192) | +0.031 [+0.000, +0.062] | 0.588 (n=240) | +0.017 [-0.013, +0.046] | 13 |
+|   ablation: no receiver state | 0.615 (n=192) | +0.021 [-0.010, +0.052] | 0.588 (n=240) | +0.017 [-0.013, +0.050] | 8 |
+
+## HoosierHelp — sampling-seed robustness (all 5 behaviors, 240 episodes per run; mean ± std over seeds)
+
+| system | seed 0 | seed 1 | seed 2 | mean ± std |
+|---|---|---|---|---|
+| v5 text controller (no asks) | 0.571 | 0.583 | (pending) | 0.577 ± 0.009 (n=2) |
+| v5 without fallback clarification | 0.383 | 0.387 | (pending) | 0.385 ± 0.002 (n=2) |
+| v5 + decision-relevance VOI | 0.583 | 0.579 | (pending) | 0.581 ± 0.003 (n=2) |
+| v5 + learned rich-text controller | 0.583 | 0.588 | (pending) | 0.585 ± 0.003 (n=2) |
 
 ## HoosierHelp v5 — by behavior and by case (text controller)
 
@@ -48,4 +71,4 @@ Original NGQA paper, best reported configuration (GPT-4o-mini + ToG): standard 0
 
 ## Spend
 
-Simulated-user API spend to date: $90.75 over 45062 calls (gpt-4.1 until 2026-10-19 05:30, gpt-4.1-mini after; replies cached by transcript prefix).
+Simulated-user API spend to date: $91.18 over 45706 calls (gpt-4.1 until 2026-10-19 05:30, gpt-4.1-mini after; replies cached by transcript prefix).

@@ -80,6 +80,24 @@ def main():
             out.append(f"| {label} | (pending) | | |")
             continue
         out.append(f"| {label} | {rate(run, k4)} | {rate(run, allk)} | {rate(run, ksc)} |")
+    out.append("\n## HoosierHelp — related-work style baselines (same Qwen3-8B, same simulated user, same turn cap; errors count as failures)\n")
+    out.append("| system | 4 behaviors (192) | all 5 (240) | self-contradictory (48) | questions to person (avg) |\n|---|---|---|---|---|")
+    for label, path in (("single agent, official prompt, direct", "eval/hoosier_baselines/baseline_single_direct"),
+                        ("single agent, official prompt, step-by-step (thinking)", "eval/hoosier_baselines/baseline_single_cot"),
+                        ("plain role chain (one greedy handoff)", "eval/hoosier_baselines/baseline_plain_mas"),
+                        ("9-way majority-vote handoff", "eval/hoosier_baselines/baseline_vote_mas"),
+                        ("confidence handoff (uncertainty propagation)", "eval/hoosier_baselines/baseline_conf_mas"),
+                        ("**ours: v5 text controller**", "eval/final/hoosier_text_mas_b5"),
+                        ("**ours: v5 + learned rich-text controller**", "eval/final/hoosier_richtext_mc_b5")):
+        run = load(path)
+        if run is None:
+            out.append(f"| {label} | (pending) | | | |")
+            continue
+        ks = sorted(run)
+        k4_ = [k for k in ks if not k.endswith("self_contradictory")]
+        ksc_ = [k for k in ks if k.endswith("self_contradictory")]
+        uq = statistics.mean((r.get("score") or {}).get("user_questions", 0) for r in run.values())
+        out.append(f"| {label} | {rate(run, k4_)} | {rate(run, ks)} | {rate(run, ksc_)} | {uq:.2f} |")
     out.append("\n## HoosierHelp — clarification controllers on the v5 workflow (paired vs. v5 text controller)\n")
     out.append("| controller | 4 behaviors | Δ vs no-ask [95% CI] | all 5 | Δ all | asks to person |\n|---|---|---|---|---|---|")
     for label, path in (("no agent-to-agent asks (v5 text)", "eval/final/hoosier_text_mas_b5"),
@@ -87,13 +105,28 @@ def main():
                         ("max-uncertainty", "eval/final/hoosier_max_uncertainty_b5"),
                         ("fixed field order", "eval/final/hoosier_fixed_order_b5"),
                         ("decision-relevance VOI (deterministic)", "eval/final/hoosier_voi_det_b5"),
-                        ("learned rich-text controller (v5 labels)", "eval/final/hoosier_richtext_mc_b5")):
+                        ("learned rich-text controller (v5 labels)", "eval/final/hoosier_richtext_mc_b5"),
+                        ("  ablation: no dependency features", "eval/final/hoosier_richtext_mc_no_dependency_b5"),
+                        ("  ablation: no receiver state", "eval/final/hoosier_richtext_mc_no_receiver_state_b5")):
         run = load(path)
         if run is None or v5 is None:
             out.append(f"| {label} | (pending) | | | | |")
             continue
         asks = sum(1 for r in run.values() for e in (r.get("trace") or []) if e.get("kind") == "clarification" and "user_reply" in e)
         out.append(f"| {label} | {rate(run, k4)} | {paired(run, v5, k4)} | {rate(run, allk)} | {paired(run, v5, allk)} | {asks} |")
+    # ---------------- multi-seed robustness (same 240 episodes, sampling seeds 0/1/2)
+    out.append("\n## HoosierHelp — sampling-seed robustness (all 5 behaviors, 240 episodes per run; mean ± std over seeds)\n")
+    out.append("| system | seed 0 | seed 1 | seed 2 | mean ± std |\n|---|---|---|---|---|")
+    for label, name in (("v5 text controller (no asks)", "hoosier_text_mas_b5"), ("v5 without fallback clarification", "hoosier_text_mas_nofb_b5"),
+                        ("v5 + decision-relevance VOI", "hoosier_voi_det_b5"), ("v5 + learned rich-text controller", "hoosier_richtext_mc_b5")):
+        vals = []
+        for sd in (0, 1, 2):
+            run = load(f"eval/final/{name}" if sd == 0 else f"eval/final/seed{sd}/{name}")
+            vals.append(statistics.mean(em(r) for r in run.values()) if run else None)
+        got = [v for v in vals if v is not None]
+        cells = " | ".join(f"{v:.3f}" if v is not None else "(pending)" for v in vals)
+        ms = f"{statistics.mean(got):.3f} ± {(statistics.stdev(got) if len(got) > 1 else 0.0):.3f} (n={len(got)})" if got else "—"
+        out.append(f"| {label} | {cells} | {ms} |")
     if v5:
         out.append("\n## HoosierHelp v5 — by behavior and by case (text controller)\n")
         byb = collections.defaultdict(list); byc = collections.defaultdict(list)
