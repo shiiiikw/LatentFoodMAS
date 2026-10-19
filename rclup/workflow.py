@@ -486,6 +486,7 @@ class HoosierWorkflow(Workflow):
         """Source-grounded literal recovery: county/ZIP/city mentioned by the person, validated against the index."""
         import re as _re
         found = {}
+        replies_text = replies_text.lower()   # callers pass raw replies too; city patterns are lower-case
         counties = [m.group(1).strip().upper() for m in _re.finditer(r"([A-Za-z][A-Za-z.' ]{1,30}?)\s+county\b", replies_text, flags=_re.I)]
         counties = [c.split()[-1] if c.split()[-1] in self.known_counties else c for c in counties]
         counties = sorted({c for c in counties if c in self.known_counties})
