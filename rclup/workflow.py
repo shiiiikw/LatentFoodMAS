@@ -10,6 +10,7 @@ branched for label collection (App. B.2).
 """
 from __future__ import annotations
 
+import collections
 import copy
 import json
 import random
@@ -87,6 +88,71 @@ class DisagreementController(Controller):
         return Decision("commit", ctx.greedy_index())
 
 
+def _question_masses(ctx: "ReceiverContext", q: "Question") -> tuple[float, float]:
+    """Support mass on the two sides of a menu question (residual side = unlisted + unknown mass)."""
+    pk = ctx.incoming[0]
+    wa = sum(c.weight for c in pk.candidates if c.key == q.a)
+    if q.b == "__residual__":
+        wb = pk.residual_weight + sum(c.weight for c in pk.candidates if not c.is_unresolved and c.key != q.a
+                                      and ctx.aux.get("field_value", {}).get((c.key, q.qid)) == "unknown")
+    else:
+        wb = sum(c.weight for c in pk.candidates if c.key == q.b)
+    return wa, wb
+
+
+class MaxUncertaintyController(Controller):
+    """Heuristic control: ask the question whose minority side carries the most support (largest disagreement mass)."""
+    name = "max_uncertainty"
+
+    def decide(self, ctx):
+        if ctx.menu and ctx.items_left > 0:
+            scored = sorted(ctx.menu, key=lambda q: -min(_question_masses(ctx, q)))
+            return Decision("ask", question=scored[0], scores={"masses": [_question_masses(ctx, q) for q in ctx.menu]})
+        return Decision("commit", ctx.greedy_index())
+
+
+class FixedOrderController(Controller):
+    """Heuristic control: ask open questions in the task's fixed field order (ignores disagreement tiers)."""
+    name = "fixed_order"
+
+    def decide(self, ctx):
+        if ctx.menu and ctx.items_left > 0:
+            order = ctx.aux.get("field_order", {})
+            scored = sorted(ctx.menu, key=lambda q: order.get(q.qid, 10 ** 6))
+            return Decision("ask", question=scored[0])
+        return Decision("commit", ctx.greedy_index())
+
+
+class VOIController(Controller):
+    """Decision-relevance value of information (deterministic, no learning): a question is worth asking only if the
+    interpretations it separates lead to different downstream outcomes (search results / rule verdicts). Value = support
+    mass of the alternatives that both differ on the asked field and change the outcome relative to the greedy one."""
+    name = "voi_det"
+
+    def decide(self, ctx):
+        sig = ctx.aux.get("signature", {})
+        fv = ctx.aux.get("field_value", {})
+        pk = ctx.incoming[0]
+        greedy = pk.greedy
+        gains = []
+        for q in ctx.menu:
+            g_sig = sig.get(greedy.key)
+            g_val = fv.get((greedy.key, q.qid))
+            value = 0.0
+            for c in pk.candidates:
+                if c.is_unresolved or c.key == greedy.key:
+                    continue
+                if fv.get((c.key, q.qid)) != g_val and sig.get(c.key) != g_sig:
+                    value += c.weight
+            if g_val == "unknown":
+                value += pk.residual_weight   # the greedy program itself cannot be executed without this fact
+            gains.append(value)   # a contradiction question has value only if its alternatives change the outcome (none when the stated fact is already used)
+        if ctx.menu and ctx.items_left > 0 and gains and max(gains) > 0:
+            i = max(range(len(gains)), key=lambda k: gains[k])
+            return Decision("ask", question=ctx.menu[i], scores={"voi": gains})
+        return Decision("commit", ctx.greedy_index(), scores={"voi": gains})
+
+
 class RoundRobinMenuController(Controller):
     """Prefix-generation policy (App. B.1): round-robin over the menu up to the budget, then pi_0 commit."""
     name = "round_robin_menu"
@@ -130,6 +196,7 @@ class ReceiverContext:
     task_state_text: str
     features: Any = None
     state_vec: Any = None
+    aux: dict = field(default_factory=dict)   # workflow-provided deterministic side information (shared by all controllers)
 
     def greedy_index(self) -> int:
         for i, c in enumerate(self.candidates):
@@ -195,6 +262,8 @@ class Workflow:
         clone.prefix_hook = None
         if hasattr(self, "fallback_overrides"):
             clone.fallback_overrides = dict(self.fallback_overrides)
+        if hasattr(self, "asked_count"):
+            clone.asked_count = collections.Counter(self.asked_count)
         return clone
 
     # ----- helpers -----
@@ -295,13 +364,20 @@ class HoosierWorkflow(Workflow):
         self.category_help = "\n".join(f"- {c}: {SERVICE_CATEGORY_DESCRIPTIONS.get(c, '')}" for c in self.categories)
         self.llm_planner = False  # ablation switch: deterministic planner mapping by default
         self.confirmation_questions = False  # tier-2 confirmations off: evidence-resolved confirmations carry no new information
+        self.contradiction_clarification = True  # ask the person directly (the simulated user follows the documented protocol, see npc.py)
+        self.asked_count = collections.Counter()   # (need_id, field) -> times the person was asked for it
+        self.prune_on_answer = False  # candidate-indexed clarification: an evidence-resolved answer prunes the sender's candidates instead of re-proposing
         self.user_direct = True  # disagreement/unknown questions go to the person directly (the evidence is ambiguous by construction)
         self.use_relaxation = True  # counterfactual relaxation diagnosis after empty results
 
     def set_variant(self, variant: str) -> None:
-        """Module ablation presets: v1 = none of the new modules, v2 = +relaxation diagnosis, v3 = +deterministic planner, v4 = +direct questions."""
-        presets = {"v1": (False, True, True, False), "v2": (True, True, True, False), "v3": (True, False, True, False), "v4": (True, False, False, True)}
-        self.use_relaxation, self.llm_planner, self.confirmation_questions, self.user_direct = presets[variant]
+        """Module ablation presets: v1 = none of the new modules, v2 = +relaxation diagnosis, v3 = +deterministic planner,
+        v4 = +direct-to-user disagreement/unknown questions, v5 = v4 + no re-proposal on evidence-only answers (candidate pruning)."""
+        presets = {"v1": (False, True, True, False, False), "v2": (True, True, True, False, False), "v3": (True, False, True, False, False),
+                   "v4": (True, False, False, True, False), "v5": (True, False, False, True, True), "v5nofb": (True, False, False, True, True)}
+        self.use_relaxation, self.llm_planner, self.confirmation_questions, self.user_direct, self.prune_on_answer = presets[variant]
+        self.fallback_clarification = variant != "v5nofb"   # ablation: never ask the person to relax a constraint after an empty search
+        self.contradiction_clarification = variant not in ("v5nofb",) and getattr(self, "contradiction_clarification", True)
         self.last_fallback_request = None
         self.fallback_overrides = {}
         from .envs.hoosier_env import _Native
@@ -310,12 +386,19 @@ class HoosierWorkflow(Workflow):
         self.known_cities = {str(r.city).upper() for r in index.resources if getattr(r, "city", None)}
 
     # ----- prompts -----
+    DENIAL_RE = re.compile(r",?\s*\b(but|however|although|though)\b\s+(I|we)\s+(cannot|can't|can not|am not able to|won't|do not|don't)\b[^.?!;]*", re.I)
+
+    def normalize_contradiction(self, text: str) -> str:
+        """Task module: the benchmark's self-contradictory user states the real fact and denies it in one sentence
+        ('X works for me, but I cannot do X'); the denial clause is dropped so every agent reads the stated fact."""
+        return self.DENIAL_RE.sub("", text)
+
     def _conversation_text(self, env) -> str:
         lines, k = [], 0
         for m in env.messages:
             if m["role"] == "user" and not m["content"].startswith("Tool result for search_resources call"):
                 k += 1
-                lines.append(f"[person {k}] {m['content']}")
+                lines.append(f"[person {k}] {self.normalize_contradiction(m['content'])}")
             elif m["role"] == "assistant" and "<tool_call>" not in m["content"]:
                 lines.append(f"[agent] {m['content']}")
             elif m["role"] == "user":
@@ -370,6 +453,72 @@ class HoosierWorkflow(Workflow):
                 found["cities"] = cities
         return found or None
 
+    CATEGORY_KEYWORDS = {
+        "Material Goods": (r"\bhousehold", r"\bmaterial", r"\bgoods\b", r"\bitems\b", r"\bfurniture", r"\bclothes", r"\bdiapers"),
+        "Tax Help": (r"\btax",), "Legal and Court Help": (r"\blegal", r"\bcourt", r"\blawyer"),
+        "Financial Assistance and Benefits": (r"\bfinancial", r"\bbenefit", r"\bmoney", r"\bbills?\b", r"\bpaying\b"),
+        "Public Safety": (r"\bsafety", r"\bpolice"), "Transportation": (r"\btransport", r"\bride\b", r"\bbus\b"),
+        "Substance Use Services": (r"\bsubstance", r"\brehab", r"\bdrug", r"\balcohol"),
+        "Employment and Job Training": (r"\bjobs?\b", r"\bemployment", r"\btraining"),
+        "Pet and Animal Services": (r"\bpets?\b", r"\bdog", r"\bcat\b", r"\banimal", r"\bvet\b"),
+        "Pregnancy and Reproductive Health": (r"\bpregnan", r"\breproductive", r"\bprenatal"),
+        "Utility Assistance": (r"\butilit", r"\belectric", r"\bgas bill", r"\bwater bill"),
+        "Family and Caregiver Services": (r"\bcaregiver", r"\bfamily (support|services|help)"),
+        "Medical Support Services": (r"\bmedical", r"\bdoctor"), "Disability and Rehabilitation": (r"\bdisabilit", r"\brehabilitation"),
+        "Community and Recreation": (r"\bcommunity", r"\brecreation", r"\bactivities"),
+        "Housing and Shelter": (r"\bhousing", r"\bshelter", r"\bplace to stay", r"\bsomewhere to stay"),
+        "Disaster and Environmental Services": (r"\bdisaster", r"\benvironment", r"\bstorm", r"\bflood"),
+        "Food Assistance": (r"\bfood\b", r"\bgroceries", r"\bhungry"), "Health Care": (r"\bhealth ?care", r"\bclinic"),
+    }
+    VALUE_LITERALS = {
+        "intake_methods": {"call": (r"\bcall", r"\bphone"), "email": (r"\be-?mail",), "mail": (r"(?<![e-])\bmail\b", r"\bpostal"), "online": (r"\bonline", r"\bwebsite"),
+                           "text": (r"\btext",), "walk_in": (r"\bwalk", r"\bin[- ]person"), "appointment": (r"\bappointment",)},
+        "day": {"mon": (r"\bmon(day)?s?\b",), "tue": (r"\btue(s|sday)?s?\b",), "wed": (r"\bwed(nesday)?s?\b",), "thu": (r"\bthu(rs|rsday)?s?\b",),
+                "fri": (r"\bfri(day)?s?\b",), "sat": (r"\bsat(urday)?s?\b",), "sun": (r"\bsun(day)?s?\b",)},
+    }
+
+    def _user_sentences(self, env) -> list[str]:
+        out = []
+        for m in env.messages:
+            if m["role"] != "user" or m["content"].startswith("Tool result for search_resources call"):
+                continue
+            out += [x.strip().lower() for x in re.split(r"(?<=[.!?;])\s+", self.normalize_contradiction(m["content"])) if x.strip()]
+        return out
+
+    def ground_binding(self, env, needs: list[dict]) -> bool:
+        """Task module (composite needs): a concrete intake-method / weekday value attached to need A must be supported by a
+        sentence that is about need A (or about both / no particular need); if every sentence that mentions the value is
+        about need B only, the value was bound to the wrong need and is dropped from A."""
+        sents = self._user_sentences(env)
+        kws = []
+        for n in needs:
+            cat = n["service_categories"][0] if isinstance(n["service_categories"], list) and n["service_categories"] else ""
+            kws.append(self.CATEGORY_KEYWORDS.get(cat, ()))
+        if not all(kws):
+            return False
+        generic = re.compile(r"\b(both|either|each|all of|neither)\b")
+        changed = False
+        for i, n in enumerate(needs):
+            mine, other = kws[i], kws[1 - i]
+            checks = []
+            if isinstance(n.get("intake_methods"), list):
+                for v in n["intake_methods"]:
+                    pats = self.VALUE_LITERALS["intake_methods"].get(v)
+                    if pats:
+                        checks.append(("intake_methods", pats))
+            if isinstance(n.get("schedule"), dict) and n["schedule"].get("day") in self.VALUE_LITERALS["day"]:
+                checks.append(("schedule", self.VALUE_LITERALS["day"][n["schedule"]["day"]]))
+            for f, pats in checks:
+                hits = [s for s in sents if any(re.search(p, s) for p in pats)]
+                if not hits:
+                    continue
+                if all(any(re.search(k, s) for k in other) and not any(re.search(k, s) for k in mine) and not generic.search(s) for s in hits):
+                    was_asked = (n["need_id"], f) in self.asked or ("*", f) in self.asked
+                    n[f] = R.NONE if was_asked else R.UNKNOWN
+                    changed = True
+                    self.trace.add("binding_grounding", need_id=n["need_id"], field=f, dropped=True)
+        return changed
+
     # ----- task-specific module: provenance checks on intake candidates -----
     def check_intake_packet(self, env, packet: Packet) -> None:
         """(a) an empty container is 'none' only if the field was asked, else 'unknown'; a 'none' claim for an
@@ -390,6 +539,9 @@ class HoosierWorkflow(Workflow):
                     was_asked = (n["need_id"], f) in self.asked or ("*", f) in self.asked
                     if n[f] == R.EMPTY:
                         n[f] = R.NONE if was_asked else R.UNKNOWN
+                        changed = True
+                    if n[f] == R.UNKNOWN and self.asked_count.get((n["need_id"], f), 0) + self.asked_count.get(("*", f), 0) >= 2:
+                        n[f] = R.NONE   # asked twice and still nothing concrete: treat as no constraint instead of asking a third time
                         changed = True
                     elif n[f] == R.NONE and not was_asked:
                         n[f] = R.UNKNOWN
@@ -420,6 +572,8 @@ class HoosierWorkflow(Workflow):
                 sch = n["schedule"]
                 if isinstance(sch, dict):
                     cleaned = {k: v for k, v in sch.items() if k not in ("time", "start_time", "end_time") or R.time_supported(v, text)}
+                    if cleaned.get("requires_24_hours") and not re.search(r"\b24\b|twenty[- ]four|around the clock|any time of day", text):
+                        cleaned = {k: v for k, v in cleaned.items() if k != "requires_24_hours"}
                     # a single time that is actually the start of a stated window becomes that window
                     if "time" in cleaned:
                         for a, b in R.time_ranges(replies_text):
@@ -435,6 +589,8 @@ class HoosierWorkflow(Workflow):
                         if n[f] != action:
                             n[f] = action
                             changed = True
+            if len(art["needs"]) == 2:
+                changed = self.ground_binding(env, art["needs"]) or changed
             if changed:
                 key, norm = spec.canon(art)
                 c.key, c.artifact, c.text = key, norm, spec.render(norm)
@@ -535,8 +691,35 @@ class HoosierWorkflow(Workflow):
                 merged[c.key] = c
         planner_packet.candidates = sorted(merged.values(), key=lambda c: (c.is_unresolved, not c.greedy, -c.count))
 
+    def planner_aux(self, env, packet: Packet, menu: list[Question]) -> dict:
+        """Deterministic side information for heuristic controllers: per interpretation, the search outcome signature
+        (resource ids per need, or 'unresolved'), the value each interpretation assigns to every menu field, and the
+        task's fixed field order."""
+        ind, index = env.n["indiana211"], env.n["index"]
+        signature, field_value = {}, {}
+        for c in packet.candidates:
+            if c.is_unresolved:
+                continue
+            sig = []
+            for n in c.artifact["needs"]:
+                args = R.intake_to_search_args(n)
+                if args is None:
+                    sig.append("unresolved")
+                else:
+                    res = ind.execute_search_resources(index, args, limit=env.tool_limit).get("resources") or []
+                    sig.append(tuple(sorted(r.get("resource_id", r.get("id", str(r))) if isinstance(r, dict) else str(r) for r in res)))
+            signature[c.key] = tuple(sig)
+            for q in menu:
+                need = next((n for n in c.artifact["needs"] if n["need_id"] == q.scope.get("need_id")), None)
+                v = need.get(q.scope["field"]) if need is not None else "missing"
+                field_value[(c.key, q.qid)] = "unknown" if v in (R.UNKNOWN, R.EMPTY) else json.dumps(v, sort_keys=True)
+        fields = ("service_categories",) + R.FIELDS
+        order = {q.qid: (q.scope.get("need_id", ""), fields.index(q.scope["field"]) if q.scope.get("field") in fields else 99) for q in menu}
+        rank = {qid: i for i, (qid, _) in enumerate(sorted(order.items(), key=lambda kv: kv[1]))}
+        return {"signature": signature, "field_value": field_value, "field_order": rank}
+
     # ----- task-specific module: atomic question menu over (need, field) distinctions -----
-    def planner_menu(self, packet: Packet, asked: set[str]) -> list[Question]:
+    def planner_menu(self, packet: Packet, asked: set[str], env=None) -> list[Question]:
         """Atomic (need, field) questions: candidate-vs-candidate where interpretations disagree, candidate-vs-unknown
         where a field is unresolved, and candidate-vs-residual confirmations of agreed concrete values. Ordered by
         tier (disagreement, unknown, confirmation) then field order; capped at Q_MAX."""
@@ -576,7 +759,45 @@ class HoosierWorkflow(Workflow):
                             "Quote the person's words; if the value is not supported, correct it or ask them.")
                     tiers[2].append(Question(qid, "intake", {"need_id": need_id, "field": f}, a_c[0].key, "__residual__", text, tier=2))
         menu = tiers[0] + tiers[1] + (tiers[2] if self.confirmation_questions else [])
+        if env is not None and self.contradiction_clarification:
+            menu = self.contradiction_questions(env, cands, asked) + menu
         return menu[:Q_MAX]
+
+    CONTRA_RE = re.compile(r"\b(but|however|although|though)\b[^.?!]{0,80}\b(can't|cannot|can not|not able|won't|don't|do not|isn't|is not|doesn't|does not|unavailable)\b", re.I)
+    FIELD_WORDS = {"location": ("county", "city", "zip", "area", "town", "located", "location", "go to", "travel", "live"),
+                   "schedule": ("day", "time", "morning", "afternoon", "evening", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+                                "24 hours", "weekday", "weekend", "schedule", "am", "pm", "o'clock"),
+                   "intake_methods": ("intake", "phone", "call", "email", "mail", "online", "walk", "in person", "in-person", "text", "appointment", "apply")}
+
+    def contradiction_questions(self, env, cands: list[Candidate], asked: set[str]) -> list[Question]:
+        """Task module: a person's turn that states a value and negates it in the same breath ('X works for me, but I
+        cannot do X') is a genuine ambiguity the samples do not expose; surface it as a disagreement question."""
+        out = []
+        need_ids = sorted({n["need_id"] for c in cands for n in c.artifact["needs"]})
+        names = {n["need_id"]: (n["service_categories"][0] if isinstance(n["service_categories"], list) and n["service_categories"] else n["need_id"])
+                 for c in cands for n in c.artifact["needs"]}
+        for m in env.messages:
+            if m["role"] != "user":
+                continue
+            for sent in re.split(r"(?<=[.!?])\s+", m["content"]):
+                if not self.CONTRA_RE.search(sent):
+                    continue
+                low = sent.lower()
+                fields = [f for f, words in self.FIELD_WORDS.items() if any(w in low for w in words)]
+                if not fields:
+                    continue
+                f = fields[0]
+                targets = [nid for nid in need_ids if names[nid].lower().split()[0] in low] or need_ids[:1]
+                for nid in targets:
+                    qid = f"{nid}:{f}:contradiction"
+                    if qid in asked or f"{nid}:{f}" in asked or any(q.qid == qid for q in out):
+                        continue
+                    greedy = next((c for c in cands if c.greedy), cands[0])
+                    label = R.FIELD_LABEL.get(f, f)
+                    text = (f"For the {names[nid]} need, the person said something conflicting about their {label} (\"{sent.strip()[:160]}\"). "
+                            f"Which {label} actually applies, or do they have no requirement?")
+                    out.append(Question(qid, "intake", {"need_id": nid, "field": f}, greedy.key, "__residual__", text, tier=0))
+        return out
 
     # ----- ordinary intake rule -----
     def ask_user_for_missing(self, env, artifact: dict) -> bool:
@@ -609,6 +830,7 @@ class HoosierWorkflow(Workflow):
         reply = env.ask_user(text)
         for n, f in targets:
             self.asked.add((n, f))
+            self.asked_count[(n, f)] += 1
         self.trace.add("user_question", kind_detail="ordinary_intake", fields=fields_text, text=text, reply=reply)
         return True
 
@@ -648,12 +870,94 @@ class HoosierWorkflow(Workflow):
         minimal = ["+".join(union)] if union else []
         return {"report": report, "per_need": per_need, "minimal": minimal}
 
-    def ask_user_fallback(self, env, request: str) -> None:
-        prompt = [{"role": "system", "content": self.native_prompt},
-                  {"role": "user", "content": "Conversation so far:\n" + self._conversation_text(env) +
-                   f"\n\nThe last search returned no resources. Write the next assistant message only (no tool call): "
-                   f"ask whether the person's {request} can be adjusted, in one short message."}]
-        text = self.greedy_text(prompt, purpose="fallback_question")
+    FIELD_WORD = {"location": "location", "schedule": "schedule", "intake": "intake method"}
+
+    def apply_overrides(self, packet: Packet, overrides: dict) -> None:
+        """Deterministic repair: apply (need_id, field) -> value overrides to every intake interpretation in place."""
+        spec = self.roles["intake"]
+        merged: dict[str, Candidate] = {}
+        for c in packet.candidates:
+            if c.is_unresolved:
+                merged[c.key] = c
+                continue
+            art = copy.deepcopy(c.artifact)
+            changed = False
+            for n in art["needs"]:
+                for (need_id, f), action in overrides.items():
+                    if need_id in (n["need_id"], "*") and action is not None and n.get(f) != action:
+                        n[f] = action
+                        changed = True
+            if changed:
+                key, norm = spec.canon(art)
+                c.key, c.artifact, c.text = key, norm, spec.render(norm)
+            if c.key in merged:
+                m = merged[c.key]
+                m.count += c.count
+                m.weight += c.weight
+                m.greedy = m.greedy or c.greedy
+            else:
+                merged[c.key] = c
+        packet.candidates = sorted(merged.values(), key=lambda c: (c.is_unresolved, not c.greedy, -c.count))
+        packet.extra["overrides_applied"] = packet.extra.get("overrides_applied", []) + [f"{k[0]}|{k[1]}" for k in overrides]
+
+    def fallback_round(self, env, inv: Invocation, empty: list[tuple[dict, dict]], diagnosis: dict | None, st: dict) -> bool:
+        """One clarification round for every unmatched need at once: name each need and the constraints whose
+        relaxation would make it match (from the counterfactual diagnosis), interpret the reply per need, and apply the
+        resulting overrides to the intake packet deterministically. Returns True when some constraint changed."""
+        names = {n["need_id"]: (n["service_categories"][0] if isinstance(n["service_categories"], list) and n["service_categories"] else n["need_id"])
+                 for n in inv.packet.greedy.artifact["needs"]}
+        asked = st.setdefault("fb_asked", {})
+        parts, asked_ids, fields_asked = [], [], []
+        for i, (p, _) in enumerate(empty):
+            nid = p["need_id"]
+            alts = (diagnosis["per_need"][i] if diagnosis and i < len(diagnosis.get("per_need", [])) else []) or ["location", "schedule", "intake"]
+            fields = []
+            for combo in alts:
+                for f in combo.split("+"):
+                    if f not in fields and f not in asked.get(nid, []):
+                        fields.append(f)
+            if not fields:
+                continue
+            asked.setdefault(nid, []).extend(fields)
+            asked_ids.append(nid)
+            fields_asked += fields
+            parts.append(f"{names.get(nid, nid)} (your {' or '.join(self.FIELD_WORD[f] for f in fields)})")
+        if not parts:
+            return False
+        text = ("I could not find any resources for " + "; ".join(parts) +
+                ". Could any of those constraints be changed, and if so, to what? Please answer for each need.")
+        reply = env.ask_user(text)
+        self.last_fallback_request = ", ".join(sorted({self.FIELD_WORD[f] for f in fields_asked}))
+        allowed = {(nid, {"intake": "intake_methods"}.get(f, f)) for nid in asked_ids for f in asked.get(nid, [])}
+        overrides = self.resolve_fallback_reply(env, text, reply, asked_ids, allowed)
+        adjustable = [a for a in getattr(self, "_adjustable", []) if a not in overrides]
+        self.trace.add("user_question", kind_detail="fallback_repair", request=text, text=text, reply=reply)
+        self.trace.add("fallback_resolution", request=text, overrides={f"{k[0]}|{k[1]}": v for k, v in overrides.items()}, adjustable=adjustable)
+        if adjustable and env.turns_left > 2:
+            labels = ", ".join(sorted({R.FIELD_LABEL.get(f, f) for _, f in adjustable}))
+            text2 = (f"Thanks. Which specific {labels} would work for you instead (or is any value fine)?"
+                     + (" Please answer for each need." if len(names) > 1 else ""))
+            reply2 = env.ask_user(text2)
+            more = self.resolve_fallback_reply(env, text2, reply2, asked_ids, set(adjustable))
+            more = {k: v for k, v in more.items() if k in adjustable}
+            for key in adjustable:
+                if key not in more:
+                    more[key] = R.NONE
+            overrides.update(more)
+            self.trace.add("user_question", kind_detail="fallback_followup", fields=labels, text=text2, reply=reply2)
+            self.trace.add("fallback_resolution", request=labels, overrides={f"{k[0]}|{k[1]}": v for k, v in overrides.items()})
+        for f in fields_asked:
+            self.asked.add(("*", {"intake": "intake_methods"}.get(f, f)))
+        if overrides:
+            self.apply_overrides(inv.packet, overrides)
+            st["executed_programs"] = []
+        return bool(overrides)
+
+    def ask_user_fallback(self, env, request: str, need_name: str | None = None) -> None:
+        # deterministic wording: name the need (composite cases) and ask only whether the constraint can change
+        what = f"for {need_name}" if need_name else "matching your request"
+        text = (f"I could not find any resources {what} with your current {request}. "
+                f"Could your {request} {'for ' + need_name + ' ' if need_name else ''}be changed, and if so, to what?")
         reply = env.ask_user(text)
         self.last_fallback_request = request
         self.fallback_overrides = self.resolve_fallback_reply(env, text, reply)
@@ -682,9 +986,14 @@ class HoosierWorkflow(Workflow):
                 self.asked.add(("*", f))
         self.trace.add("user_question", kind_detail="fallback_repair", request=request, text=text, reply=reply)
 
-    def resolve_fallback_reply(self, env, question_text: str, reply: str) -> dict:
-        """Ordinary repair: interpret the person's answer to a fallback question as per-need field actions."""
+    def resolve_fallback_reply(self, env, question_text: str, reply: str, asked_ids: list[str] | None = None,
+                               allowed: set | None = None) -> dict:
+        """Ordinary repair: interpret the person's answer to a fallback question as per-need field actions.
+        `allowed` = {(need_id, field)} that this question put on the table; other fields keep their values
+        (a person saying 'I still need Thursday morning' must not have that window re-parsed)."""
         needs = [n for inv in reversed(self.invocations) if inv.role == "intake" for n in inv.packet.candidates[inv.selected].artifact["needs"]][:2]
+        if asked_ids:
+            needs = [n for n in needs if n["need_id"] in asked_ids] or needs
         need_desc = "; ".join(f"{n['need_id']} = {n['service_categories']}" for n in needs) or "need-1"
         prompt = [{"role": "system", "content": "You interpret a person's reply to a resource-search agent that asked whether a constraint could be relaxed after an empty search. "
                    "For each need and each of the fields location, schedule, intake_methods decide: \"keep\" (not mentioned or cannot change), \"none\" (the person explicitly says any value is fine / they have no preference / no longer need that constraint), "
@@ -693,8 +1002,11 @@ class HoosierWorkflow(Workflow):
                    "intake_methods array from [appointment, call, email, mail, online, text, walk_in]). A statement about one need does not apply to the other need. "
                    "Output ONLY compact JSON: {\"need-1\": {\"location\": ..., \"schedule\": ..., \"intake_methods\": ...}, \"need-2\": {...}}"},
                   {"role": "user", "content": f"Needs: {need_desc}\nAgent asked: {question_text}\nPerson replied: {reply}"}]
-        obj = R.parse_json_object(self.greedy_text(prompt, purpose="fallback_resolve")) or {}
+        raw = self.greedy_text(prompt, purpose="fallback_resolve")
+        obj = R.parse_json_object(raw) or {}
+        self.trace.add("fallback_resolve_raw", raw=raw[:600], reply=reply[:400])
         overrides, adjustable = {}, []
+        ranges = R.time_ranges(reply)
         lex = {"location": ("location", "county", "city", "zip", "area", "town", "place", "move", "travel", "elsewhere", "nearby"),
                "schedule": ("schedule", "day", "time", "hour", "week", "morning", "afternoon", "evening", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday", "24"),
                "intake_methods": ("intake", "method", "call", "phone", "email", "mail", "online", "walk", "person", "appointment", "text", "apply", "contact")}
@@ -703,36 +1015,140 @@ class HoosierWorkflow(Workflow):
             entry = obj.get(n["need_id"]) if isinstance(obj.get(n["need_id"]), dict) else {}
             for f in ("location", "schedule", "intake_methods"):
                 action = entry.get(f, "keep")
-                if isinstance(action, str) and action.strip().lower() == "keep":
+                tok = re.compile(r"^\W*(keep|none|adjustable|flexible|can change|any)\W*$", re.I)
+                if isinstance(action, list):
+                    # malformed/control tokens inside a value list ("adjustable", "keep}}") are not values
+                    flags = [str(x).strip().lower() for x in action if isinstance(x, str) and tok.match(str(x))]
+                    action = [x for x in action if not (isinstance(x, str) and tok.match(str(x)))]
+                    if not action:
+                        action = "adjustable" if any(fl.startswith(("adjust", "flex", "can")) for fl in flags) else ("none" if any(fl.startswith(("none", "any")) for fl in flags) else "keep")
+                if isinstance(action, str) and action.strip().lower().strip("}\"' ") == "keep":
                     continue
                 if f not in mentioned:
                     continue  # a field neither asked about nor mentioned cannot change
-                if isinstance(action, str) and action.strip().lower() in ("adjustable", "can change", "flexible"):
+                if allowed is not None and (n["need_id"], f) not in allowed:
+                    continue  # not on the table in this question
+                flex = re.search(r"\b(or something else|or anything else|anything else (works|is fine)|whatever works|any (method|way|location|time|day) (works|is fine)|or whatever|doesn.t matter|don.t mind)\b", reply.lower())
+                if flex and f in ("intake_methods", "location", "schedule") and f in mentioned:
+                    overrides[(n["need_id"], f)] = R.NONE
+                    continue
+                if f == "location":
+                    lit = self.recover_location(reply)
+                    if lit and lit != n.get("location"):
+                        overrides[(n["need_id"], f)] = lit   # a literal in the person's words beats the model's reading
+                        continue
+                if isinstance(action, str) and action.strip().lower().strip("}\"' ") in ("adjustable", "can change", "flexible"):
                     adjustable.append((n["need_id"], f))
                     continue
                 norm = R._norm_field(f, action)
                 if norm in (R.UNKNOWN, R.EMPTY):
                     continue
+                if f == "location" and isinstance(norm, dict) and norm.get("counties"):
+                    norm["counties"] = [c.upper().replace(" COUNTY", "").strip() for c in norm["counties"]]
+                if f == "schedule" and isinstance(norm, dict) and norm.get("day"):
+                    days = [d for d, pats in self.VALUE_LITERALS["day"].items() if any(re.search(p, reply.lower()) for p in pats)]
+                    if norm["day"] not in days:
+                        if len(days) == 1:
+                            norm["day"] = days[0]          # the model misread the weekday; the person named exactly one
+                        else:
+                            norm = {k: v for k, v in norm.items() if k != "day"}
+                            if not norm:
+                                continue
+                if f == "schedule" and isinstance(norm, dict):
+                    # a single time that starts a stated window becomes that window
+                    if "time" in norm:
+                        for a, b in ranges:
+                            if norm["time"] == a:
+                                norm = {k: v for k, v in norm.items() if k != "time"} | {"start_time": a, "end_time": b}
+                                break
+                    # time literals must be traceable to the person's words; repair a window from the reply when possible
+                    times = [norm.get(k) for k in ("time", "start_time", "end_time") if norm.get(k)]
+                    if any(not R.time_supported(t, reply) for t in times):
+                        if len(ranges) == 1 and ("start_time" in norm or "end_time" in norm or "time" in norm):
+                            norm = {k: v for k, v in norm.items() if k not in ("time", "start_time", "end_time")} | {"start_time": ranges[0][0], "end_time": ranges[0][1]}
+                        else:
+                            norm = {k: v for k, v in norm.items() if k not in ("time", "start_time", "end_time")}
+                            if not norm:
+                                continue
                 overrides[(n["need_id"], f)] = norm
+        # 'nearby / anywhere / any location' without a new literal = no location constraint
+        if "location" in mentioned and re.search(r"\b(nearby|anywhere|any (location|area|place|county|city|where)|surrounding|other (areas|counties|places|cities)|wherever)\b", reply.lower()):
+            new_lit = self.recover_location(reply)
+            for n in needs:
+                key = (n["need_id"], "location")
+                if key not in overrides or overrides[key] == R.NONE or new_lit is None or overrides[key] == new_lit:
+                    prev = n.get("location")
+                    if new_lit is None or new_lit == prev:
+                        overrides[key] = R.NONE
+                        adjustable[:] = [a for a in adjustable if a != key]
         self._adjustable = adjustable
         return overrides
 
     # ----- sender answers a clarification (source-backed) -----
     def intake_answer(self, env, question: Question) -> dict:
+        two_valued = question.b != "__residual__"
+        schema = ("{\"answer\": \"...\", \"resolved\": true|false, \"choice\": \"A\"|\"B\"|\"neither\", \"sources\": [person turn indices]}"
+                  if two_valued else "{\"answer\": \"...\", \"resolved\": true|false, \"sources\": [person turn indices]}")
+        extra = (" The question offers two values: A is the first value stated, B the second; set choice to the one the person's words "
+                 "support, or \"neither\"." if two_valued else "")
         prompt = [{"role": "system", "content": "You are the intake agent. Answer the planner's clarification strictly from what the person said. "
-                   "Output ONLY compact JSON: {\"answer\": \"...\", \"resolved\": true|false, \"sources\": [person turn indices]}. "
-                   "Set resolved=false if the conversation does not settle it."},
+                   f"Output ONLY compact JSON: {schema}. Set resolved=false if the conversation does not settle it.{extra}"},
                   {"role": "user", "content": "Conversation so far:\n" + self._conversation_text(env) + "\n\nQuestion: " + question.text}]
         obj = R.parse_json_object(self.greedy_text(prompt, purpose="intake_answer")) or {}
+        choice = str(obj.get("choice") or "").strip().upper()[:1] if two_valued else ""
         return {"question": question.text, "qid": question.qid, "answer": str(obj.get("answer") or ""),
-                "resolved": bool(obj.get("resolved")), "sources": obj.get("sources") or []}
+                "resolved": bool(obj.get("resolved")), "sources": obj.get("sources") or [], "choice": choice if choice in ("A", "B") else ""}
+
+    def prune_intake_packet(self, packet: Packet, question: Question, choice: str) -> int:
+        """Candidate-indexed clarification: keep only the interpretations that agree with the chosen value on the asked
+        (need, field); support mass of the kept side is renormalized to the mass the two sides had. Returns kept count
+        (0 = nothing to do, caller falls back to re-proposal)."""
+        chosen_key = question.a if choice == "A" else question.b
+        ref = next((c for c in packet.candidates if c.key == chosen_key and not c.is_unresolved), None)
+        if ref is None:
+            return 0
+        need_id, f = question.scope.get("need_id"), question.scope.get("field")
+        need = next((n for n in ref.artifact["needs"] if n["need_id"] == need_id), None)
+        if need is None:
+            return 0
+        target = json.dumps(need.get(f), sort_keys=True)
+        keep, drop = [], []
+        for c in packet.candidates:
+            if c.is_unresolved:
+                keep.append(c)
+                continue
+            n = next((x for x in c.artifact["needs"] if x["need_id"] == need_id), None)
+            (keep if n is not None and json.dumps(n.get(f), sort_keys=True) == target else drop).append(c)
+        if not drop:
+            return len(keep)
+        total = sum(c.weight for c in packet.candidates if not c.is_unresolved)
+        kept_mass = sum(c.weight for c in keep if not c.is_unresolved)
+        for c in keep:
+            if not c.is_unresolved and kept_mass > 0:
+                c.weight = c.weight * total / kept_mass
+        if not any(c.greedy for c in keep):
+            best = max((c for c in keep if not c.is_unresolved), key=lambda c: (c.count, c.weight))
+            best.greedy = True
+        packet.candidates = keep
+        packet.extra["pruned_by"] = packet.extra.get("pruned_by", []) + [question.qid]
+        return len(keep)
 
     def intake_ask_user_for(self, env, question: Question) -> str:
-        prompt = [{"role": "system", "content": self.native_prompt},
-                  {"role": "user", "content": "Conversation so far:\n" + self._conversation_text(env) +
-                   f"\n\nWrite the next assistant message only (no tool call): ask the person one short, specific question to settle this: {question.text} "
-                   "Do not suggest values; ask whether they have a requirement or no preference."}]
-        text = self.greedy_text(prompt, purpose="clarify_user")
+        if question.qid.endswith(":contradiction"):
+            # deterministic wording: point at the conflicting statement and ask for the actual fact
+            m = re.search(r'\("(.*?)"\)\.', question.text)
+            quoted = m.group(1) if m else ""
+            label = R.FIELD_LABEL.get(question.scope.get("field", ""), question.scope.get("field", ""))
+            m2 = re.search(r"For the (.+?) need,", question.text)
+            need = m2.group(1) if m2 else ""
+            text = (f"I want to clarify and confirm your {label}{' for ' + need if need else ''}: "
+                    f"what {label} can you actually use, or do you have no requirement?")
+        else:
+            prompt = [{"role": "system", "content": self.native_prompt},
+                      {"role": "user", "content": "Conversation so far:\n" + self._conversation_text(env) +
+                       f"\n\nWrite the next assistant message only (no tool call): ask the person one short, specific question to settle this: {question.text} "
+                       "Do not suggest values; ask whether they have a requirement or no preference."}]
+            text = self.greedy_text(prompt, purpose="clarify_user")
         reply = env.ask_user(text)
         self.asked.add((question.scope.get("need_id", "*"), question.scope.get("field", "")))
         self.trace.add("user_question", kind_detail="clarification", qid=question.qid, text=text, reply=reply)
@@ -747,33 +1163,40 @@ class HoosierWorkflow(Workflow):
     def run(self, env, *, max_cycles: int = 12, resume: dict | None = None) -> dict:
         if resume is None:
             opening = env.reset()
-            st = {"replies": [], "asked": set(), "executed_programs": [], "fallback_fields_asked": []}
+            st = {"replies": [], "asked": set(), "executed_programs": [], "fallback_fields_asked": [], "found": {}}
         else:
             opening = env.messages[0]["content"]
             st = resume["st"]
         cycles = 0
         outcome = {"terminated": "unresolved"}
+        pruned = None   # intake invocation whose candidate set an evidence-resolved answer just pruned (no re-proposal)
         while cycles < max_cycles and not env.done:
             cycles += 1
             if resume is not None and cycles == 1:
                 inv, pinv, menu = resume["inv"], resume["pinv"], resume["menu"]
                 selected_intake = inv.packet.candidates[inv.selected]
             else:
-                # --- sender: intake ---
-                inv = self.invoke("intake", self.intake_messages(env), tools=self.roles["intake"].tools,
-                                  sources=list(range(1, len(env.user_replies) + 2)), purpose="intake")
-                self.check_intake_packet(env, inv.packet)
-                self.trace.add("intake_checked", inv_id=inv.inv_id, packet=inv.packet.public())
-                self.last_fallback_request = None
-                self.fallback_overrides = {}
-                selected_intake = self._pi0_pick(inv.packet) if isinstance(self.controller, Pi0Controller) else inv.packet.greedy
-                inv.selected = inv.packet.candidates.index(selected_intake)
-                # ordinary rule: collect missing facts before searching (reserve 2 turns for search + final)
-                if R.intake_missing(selected_intake.artifact) and env.turns_left > 2:
-                    self.ask_user_for_missing(env, selected_intake.artifact)
-                    continue
-                if env.turns_left < 2:
-                    break
+                if pruned is not None:
+                    inv, pruned = pruned, None
+                    selected_intake = inv.packet.greedy
+                    inv.selected = inv.packet.candidates.index(selected_intake)
+                    self.trace.add("intake_checked", inv_id=inv.inv_id, packet=inv.packet.public(), pruned=True)
+                else:
+                    # --- sender: intake ---
+                    inv = self.invoke("intake", self.intake_messages(env), tools=self.roles["intake"].tools,
+                                      sources=list(range(1, len(env.user_replies) + 2)), purpose="intake")
+                    self.check_intake_packet(env, inv.packet)
+                    self.trace.add("intake_checked", inv_id=inv.inv_id, packet=inv.packet.public())
+                    self.last_fallback_request = None
+                    self.fallback_overrides = {}
+                    selected_intake = self._pi0_pick(inv.packet) if isinstance(self.controller, Pi0Controller) else inv.packet.greedy
+                    inv.selected = inv.packet.candidates.index(selected_intake)
+                    # ordinary rule: collect missing facts before searching (reserve 2 turns for search + final)
+                    if R.intake_missing(selected_intake.artifact) and env.turns_left > 2:
+                        self.ask_user_for_missing(env, selected_intake.artifact)
+                        continue
+                    if env.turns_left < 2:
+                        break
                 # --- receiver: planner ---
                 if self.llm_planner:
                     pinv = self.invoke("planner", self.planner_messages(opening, inv.packet, st["replies"]), tools=self.roles["planner"].tools,
@@ -796,9 +1219,10 @@ class HoosierWorkflow(Workflow):
                         self.trace.add("invocation", inv_id=pinv.inv_id, role="planner", version=version, purpose="planner_deterministic",
                                        packet=pkt.public(), n_samples=0, invalid=0, invalid_examples=[], finish_reasons=[])
                 self.trace.add("planner_checked", inv_id=pinv.inv_id, packet=pinv.packet.public())
-                menu = self.planner_menu(inv.packet, st["asked"]) if env.turns_left > 2 else []
+                menu = self.planner_menu(inv.packet, st["asked"], env) if env.turns_left > 2 else []
             ctx = ReceiverContext("planner", [inv.packet], pinv.packet.candidates, menu,
                                   self.items_budget - self.items_used, env.turns_left, opening)
+            ctx.aux = self.planner_aux(env, inv.packet, menu)
             snapshot = {"inv": inv, "pinv": pinv, "menu": menu, "st": copy.deepcopy(st), "sender_invs": [inv]}
             if resume is not None and cycles == 1:
                 d = resume["forced"]
@@ -811,6 +1235,8 @@ class HoosierWorkflow(Workflow):
             if d.kind == "ask" and d.question is not None:
                 self.items_used += d.question.items
                 st["asked"].add(d.question.qid)
+                if d.question.qid.endswith(":contradiction"):
+                    st["asked"].add(d.question.qid.rsplit(":", 1)[0])
                 if self.user_direct and d.question.tier in (0, 1) and env.turns_left > 2:
                     ans = {"question": d.question.text, "qid": d.question.qid, "answer": "", "resolved": True, "sources": []}
                     ans["user_reply"] = self.intake_ask_user_for(env, d.question)
@@ -821,7 +1247,13 @@ class HoosierWorkflow(Workflow):
                         ans["resolved"] = True
                 st["replies"].append(ans)
                 self.trace.add("clarification", **ans)
-                continue  # intake re-proposes with the reply / new evidence
+                if self.prune_on_answer and "user_reply" not in ans:
+                    # evidence-only answer: no new information entered the conversation, so do not re-sample the intake
+                    # (re-proposal noise); prune the candidate set when the answer picks a side, else just re-decide
+                    kept = self.prune_intake_packet(inv.packet, d.question, ans["choice"]) if ans.get("resolved") and ans.get("choice") in ("A", "B") else 0
+                    pruned = inv
+                    self.trace.add("candidate_pruned", qid=d.question.qid, choice=ans.get("choice", ""), kept=kept)
+                continue  # intake re-proposes with the user's reply (new evidence), or re-decides on the same/pruned packet
             chosen = pinv.packet.candidates[d.candidate]
             pinv.selected = d.candidate
             if chosen.is_unresolved:
@@ -829,23 +1261,42 @@ class HoosierWorkflow(Workflow):
                     self.ask_user_for_missing(env, selected_intake.artifact)
                     continue
                 break
-            programs = [p["arguments"] for p in chosen.artifact["programs"]]
-            prog_key = json.dumps(programs, sort_keys=True)
-            if prog_key in st["executed_programs"]:
-                remaining = [f for f in ("location", "schedule", "intake") if f not in st["fallback_fields_asked"]]
-                if remaining and env.turns_left > 2:
-                    st["fallback_fields_asked"].append(remaining[0])
-                    self.ask_user_fallback(env, remaining[0])
-                    st["replies"], st["asked"] = [], set()
+            progs = chosen.artifact["programs"]
+            found = st.setdefault("found", {})          # need_id -> {"arguments", "result"} for needs already matched
+            todo = [p for p in progs if p["need_id"] not in found]
+            names = {n["need_id"]: (n["service_categories"][0] if isinstance(n["service_categories"], list) and n["service_categories"] else n["need_id"])
+                     for n in selected_intake.artifact["needs"]}
+            if todo:
+                programs = [p["arguments"] for p in todo]
+                prog_key = json.dumps(programs, sort_keys=True)
+                if prog_key in st["executed_programs"]:
+                    break
+                st["executed_programs"].append(prog_key)
+                results_new = env.search(programs)
+                if env.done:
+                    break
+                for p, r in zip(todo, results_new):
+                    if r.get("resources"):
+                        found[p["need_id"]] = {"arguments": p["arguments"], "result": r}
+                empty = [(p, r) for p, r in zip(todo, results_new) if not r.get("resources")]
+                diagnosis = self.diagnose_relaxation(env, [p["arguments"] for p, _ in empty]) if (self.use_relaxation and empty) else None
+                if diagnosis:
+                    diagnosis["need_ids"] = [p["need_id"] for p, _ in empty]
+                    self.trace.add("relaxation_diagnosis", **diagnosis)
+                # unmatched needs: clarification rounds (one question covering every unmatched need) until something
+                # changes or no relaxation is left; the repaired packet is re-planned without re-sampling the intake
+                changed = False
+                while empty and env.turns_left > 2 and not changed and self.fallback_clarification:
+                    if not self.fallback_round(env, inv, empty, diagnosis, st):
+                        break
+                    changed = True
+                if changed:
+                    pruned = inv
                     continue
-                break
-            st["executed_programs"].append(prog_key)
-            results = env.search(programs)
-            if env.done:
-                break
-            diagnosis = self.diagnose_relaxation(env, programs) if (self.use_relaxation and all(not r.get("resources") for r in results)) else None
-            if diagnosis:
-                self.trace.add("relaxation_diagnosis", **diagnosis)
+                results = [found[p["need_id"]]["result"] if p["need_id"] in found else {"resources": []} for p in progs]
+            else:
+                results = [found[p["need_id"]]["result"] for p in progs]
+                diagnosis = None
             # --- receiver: retriever ---
             rinv = self.invoke("retriever", self.retriever_messages(opening, pinv.packet, chosen, results, diagnosis), tools=self.roles["retriever"].tools,
                                ancestors=[pinv.inv_id], purpose="retriever")
@@ -854,8 +1305,15 @@ class HoosierWorkflow(Workflow):
             self.trace.add("decision", role="retriever", decision=rd.kind, candidate=rd.candidate, menu=[])
             rchosen = rinv.packet.candidates[rd.candidate]
             rinv.selected = rd.candidate
-            if rchosen.artifact.get("empty") or all(not r.get("resources") for r in results):
-                if env.turns_left > 2:
+            if rchosen.artifact.get("empty") and any(r.get("resources") for r in results) and (env.turns_left <= 2 or st.get("fb_asked")):
+                ids = [r["resources"][0].get("resource_id") or r["resources"][0].get("id") for r in results if r.get("resources") and isinstance(r["resources"][0], dict)]
+                ids = [i for i in ids if i]
+                if ids:
+                    env.finish(ids, "Here are the resources I could find for your needs.")
+                    outcome = {"terminated": "final_partial"}
+                    break
+            if rchosen.artifact.get("empty") or any(not r.get("resources") for r in results):
+                if env.turns_left > 2 and not st.get("fb_asked") and self.fallback_clarification:
                     req = rchosen.artifact.get("fallback_request", "location, schedule or intake")
                     if diagnosis and diagnosis["minimal"]:
                         # ask about every constraint in the smallest relaxation set not yet asked; else the retriever's choice
@@ -865,10 +1323,12 @@ class HoosierWorkflow(Workflow):
                     for f in ("location", "schedule", "intake"):
                         if f in req:
                             st["fallback_fields_asked"].append(f)
-                    self.ask_user_fallback(env, req)
+                    first_empty = next((p["need_id"] for p, r in zip(progs, results) if not r.get("resources")), None)
+                    self.ask_user_fallback(env, req, names.get(first_empty) if (len(progs) > 1 and first_empty) else None)
                     st["replies"], st["asked"] = [], set()
                     continue
                 break
+            # the final recommendation must cover every need: merge ids the retriever picked with the matched results it was given
             env.finish(rchosen.artifact["resource_ids"], rchosen.artifact.get("message", ""))
             outcome = {"terminated": "final"}
         return self.record_extra(env.record(), outcome, cycles)
@@ -957,6 +1417,20 @@ class NGQAWorkflow(Workflow):
                 f"Q: {r['question']}\nA: {r['answer']} (resolved={r.get('resolved')})" for r in replies)
         return [{"role": "system", "content": self.roles["reasoner"].task}, {"role": "user", "content": user}]
 
+    def reasoner_aux(self, env, packet: Packet, menu: list[Question]) -> dict:
+        signature, field_value = {}, {}
+        for c in packet.candidates:
+            if c.is_unresolved:
+                continue
+            yes = [s for s, v in c.artifact["statuses"].items() if v == R.YES]
+            signature[c.key] = R.guideline_analysis(yes, env.public_food["nutrition_tags"])["verdict"]
+            for q in menu:
+                v = c.artifact["statuses"].get(q.scope["status"], R.UNKNOWN)
+                field_value[(c.key, q.qid)] = "unknown" if v == R.UNKNOWN else v
+        order = R.status_order()
+        rank = {q.qid: order.index(q.scope["status"]) if q.scope["status"] in order else 99 for q in menu}
+        return {"signature": signature, "field_value": field_value, "field_order": rank}
+
     # task-specific module: atomic status questions, ordered by (disagreement, food relevance, support)
     def reasoner_menu(self, env, packet: Packet, asked: set[str]) -> list[Question]:
         from .envs.ngqa_env import guideline
@@ -1040,6 +1514,7 @@ class NGQAWorkflow(Workflow):
                 menu = self.reasoner_menu(env, inv.packet, st["asked"])
             ctx = ReceiverContext("reasoner", [inv.packet], rinv.packet.candidates, menu, self.items_budget - self.items_used,
                                   env.questions_left, self.food_text(env.public_food))
+            ctx.aux = self.reasoner_aux(env, inv.packet, menu)
             snapshot = {"inv": inv, "rinv": rinv, "menu": menu, "st": copy.deepcopy(st), "sender_invs": [inv]}
             if resume is not None and cycles == 1:
                 d = resume["forced"]
@@ -1052,6 +1527,8 @@ class NGQAWorkflow(Workflow):
             if d.kind == "ask" and d.question is not None:
                 self.items_used += d.question.items
                 st["asked"].add(d.question.qid)
+                if d.question.qid.endswith(":contradiction"):
+                    st["asked"].add(d.question.qid.rsplit(":", 1)[0])
                 ans = self.profile_answer(env, d.question)
                 if not ans["resolved"] and env.questions_left > 0:
                     ans["user_reply"] = self.profile_ask_user(env, d.question)

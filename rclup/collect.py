@@ -40,6 +40,7 @@ class Collector:
     def __init__(self, dataset: str, bb: VLLMClient, encoder: HiddenEncoder, ledger: CostLedger, out: Path,
                  seeds: tuple[int, ...], max_commits: int, max_questions: int, prefixes_per_root: int, items_budget: int, disclosure: str = "half"):
         self.dataset, self.bb, self.encoder, self.ledger, self.out = dataset, bb, encoder, ledger, out
+        self.variant = "v5"
         self.disclosure = disclosure
         self.seeds, self.max_commits, self.max_questions = seeds, max_commits, max_questions
         self.prefixes_per_root, self.items_budget = prefixes_per_root, items_budget
@@ -71,6 +72,8 @@ class Collector:
         prefixes: list[dict] = []
         env = make_env(self.dataset, root, self.ledger, self.disclosure)
         wf = self.WF(self.bb, policy, seed=seed, encoder=self.encoder, items_budget=self.items_budget)
+        if hasattr(wf, "set_variant"):
+            wf.set_variant(self.variant)
 
         def hook(wf_live, ctx, snapshot):
             if len(prefixes) >= self.prefixes_per_root:
@@ -180,6 +183,8 @@ def retarget(a):
                 env = env0.fork()
                 wf = WF(bb, ForcedThenLearned(Decision("ask", question=qobj), learned, seed), seed=seed, encoder=encoder, carrier=rt,
                         items_budget=a.items_budget)
+                if hasattr(wf, "set_variant"):
+                    wf.set_variant(a.variant)
                 wf.versions, wf.items_used, wf.asked = dict(ws["versions"]), ws["items_used"], set(ws["asked"])
                 wf.decision_points, wf.invocations = ws["decision_points"], list(ws["invocations"])
                 if hasattr(wf, "fallback_overrides"):
@@ -236,6 +241,7 @@ def main():
     p.add_argument("--difficulty", default=None)
     p.add_argument("--disclosure", default="half", choices=["half", "none", "full"])
     p.add_argument("--min-statuses", type=int, default=0)
+    p.add_argument("--variant", default="v5", choices=["v1", "v2", "v3", "v4", "v5", "v5nofb"], help="HoosierHelp workflow preset used while collecting")
     p.add_argument("--out", required=True)
     p.add_argument("--ledger", default=str(RUNS / "ledger_validation.json"))
     p.add_argument("--cap-usd", type=float, default=40.0)
@@ -252,6 +258,7 @@ def main():
     roots = [r for r in roots if r["root_id"] not in done]
     col = Collector(a.dataset, bb, encoder, ledger, out, tuple(int(s) for s in a.seeds.split(",")), a.max_commits, a.max_questions,
                     a.prefixes_per_root, a.items_budget, a.disclosure)
+    col.variant = a.variant
     start = time.monotonic()
     usd0 = ledger.usd
     with ThreadPoolExecutor(max_workers=a.workers) as ex:

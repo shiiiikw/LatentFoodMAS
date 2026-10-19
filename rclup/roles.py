@@ -73,6 +73,8 @@ def repair_json(text: str) -> str:
 
 
 def _fix_common_slips(text: str) -> str:
+    # {"unknown"} / {"none"} set literals (invalid JSON the 8B model writes for empty objects) -> plain tokens
+    text = re.sub(r'\{\s*"(unknown|none|empty)"\s*\}', r'"\1"', text)
     # trailing commas before a closing bracket; a top-level key emitted inside the needs list
     text = re.sub(r",\s*([\]}])", r"\1", text)
     text = re.sub(r"\}\s*,\s*\"sources\"\s*:\s*(\[[^\]]*\])\s*\}?\s*\]", lambda m: "}], \"sources\": " + m.group(1), text)
@@ -262,6 +264,13 @@ def time_ranges(text: str) -> list[tuple[str, str]]:
         h1, m1, ap1, h2, m2, ap2 = m.groups()
         ap1 = (ap1 or ap2 or "").replace(".", "").lower()
         ap2 = (ap2 or ap1 or "").replace(".", "").lower()
+        if not ap1 and not ap2:
+            # 'between 9:30 and 11:30 in the morning' / 'from 2 to 4 in the afternoon'
+            tail = (text or "")[m.end():m.end() + 40].lower()
+            if re.match(r"\s*(in the )?(morning)", tail):
+                ap1 = ap2 = "am"
+            elif re.match(r"\s*(in the )?(afternoon|evening|at night)", tail):
+                ap1 = ap2 = "pm"
         def conv(h, mm, ap):
             h = int(h)
             if ap == "pm" and h < 12:
@@ -425,6 +434,7 @@ For each need record the service category and five search fields. Each field mus
     intake_methods from [appointment, call, email, mail, online, text, walk_in] (phone -> call, in person -> walk_in; include only methods the person named as requirements; if any method is fine, "none");
     available_documents from [birth_certificate, insurance_card, lease, photo_id, proof_of_address, proof_of_income, social_security, utility_bill];
     eligibility from [disability, family, homeless, low_income, medicaid, pregnant, resident, senior, uninsured, veteran, youth].
+If the person states a value and denies the very same value in one sentence ("X works for me, but I cannot do X"), X is their real requirement: record X.
 Never write an empty list or empty object; write "unknown" or "none" instead. Never invent values. Bind each fact to the need the person attached it to; a fact stated for one need does not apply to the other unless the person said so.
 After an empty search: if the person gives a new location/schedule/intake value, replace the old value with it; if they say they can adjust, are flexible, or do not need that constraint any more, set that field to "none"; if they say a constraint cannot change, keep it.
 Record the 1-based indices of the person's messages that support the entries in "sources"."""

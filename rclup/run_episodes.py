@@ -18,12 +18,16 @@ from pathlib import Path
 from .backbone import VLLMClient
 from .common import DATA, RUNS, append_jsonl, read_jsonl, write_json
 from .cost import BudgetExceeded, CostLedger
-from .workflow import DisagreementController, GreedyController, HoosierWorkflow, NGQAWorkflow, Pi0Controller
+from .workflow import (DisagreementController, FixedOrderController, GreedyController, HoosierWorkflow, MaxUncertaintyController,
+                       NGQAWorkflow, Pi0Controller, VOIController)
 
 CONTROLLERS = {
     "text_mas": lambda seed: GreedyController(),
     "pi0": lambda seed: Pi0Controller(seed),
     "disagreement_ask": lambda seed: DisagreementController(),
+    "max_uncertainty": lambda seed: MaxUncertaintyController(),
+    "fixed_order": lambda seed: FixedOrderController(),
+    "voi_det": lambda seed: VOIController(),
 }
 LEARNED = ("rclup", "rich_text_mc", "generic_latent_mc", "rclup_q_ref", "scalar_mc")
 
@@ -117,7 +121,8 @@ def main():
     p.add_argument("--behaviors", default="normal")
     p.add_argument("--disclosure", default="half", choices=["half", "none", "full"])
     p.add_argument("--min-statuses", type=int, default=0)
-    p.add_argument("--variant", default="v4", choices=["v1", "v2", "v3", "v4"], help="HoosierHelp module ablation preset")
+    p.add_argument("--variant", default="v4", choices=["v1", "v2", "v3", "v4", "v5", "v5nofb"], help="HoosierHelp module ablation preset")
+    p.add_argument("--ablate", default="", help="comma list of controller-input ablations (must match training): dependency, receiver_state")
     p.add_argument("--out", required=True)
     p.add_argument("--ledger", default=str(RUNS / "ledger_validation.json"))
     p.add_argument("--cap-usd", type=float, default=40.0)
@@ -129,8 +134,13 @@ def main():
     ledger = CostLedger(Path(a.ledger), a.cap_usd, label="validation")
     bb = VLLMClient()
     learned, runtime, encoder = None, None, None
+    if a.ablate:
+        from . import features as _F
+        _F.ABLATION.update(x for x in a.ablate.split(",") if x)
     if a.controller in LEARNED:
         learned, runtime, encoder = build_learned(a.controller, a.carrier, a.calibrator, a.lam)
+        if a.ablate:
+            learned.name = f"{a.controller}_no_{a.ablate.replace(',', '_')}"
     roots = load_roots(a.dataset, a.split, a.limit, a.seed, a.difficulty, tuple(a.behaviors.split(",")), a.min_statuses)
     WF = HoosierWorkflow if a.dataset == "hoosier" else NGQAWorkflow
     records_path = out / "records.jsonl"

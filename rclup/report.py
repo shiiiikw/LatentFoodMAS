@@ -15,9 +15,9 @@ from pathlib import Path
 from .common import RUNS, read_json, read_jsonl, write_json
 
 
-def load_run(path: str) -> dict:
+def load_run(path: str, exclude_behaviors: tuple[str, ...] = ()) -> dict:
     d = Path(path) if Path(path).is_absolute() else RUNS / path
-    recs = read_jsonl(d / "records.jsonl")
+    recs = [r for r in read_jsonl(d / "records.jsonl") if r.get("behavior", "") not in exclude_behaviors]
     summary = read_json(d / "summary.json") if (d / "summary.json").exists() else {}
     return {"name": d.name, "path": str(d), "records": {r["root_id"] + "|" + r.get("behavior", ""): r for r in recs}, "summary": summary}
 
@@ -46,6 +46,10 @@ def table_rows(runs: list[dict], reference: dict | None, dataset: str) -> list[d
                "Q_items": statistics.mean(r.get("items_used", 0) for r in recs) if recs else 0.0,
                "user_questions": statistics.mean(r["score"].get("user_questions", 0) for r in recs) if recs else 0.0}
         if dataset == "hoosier":
+            byb = collections.defaultdict(list)
+            for r in recs:
+                byb[r.get("behavior", "")].append(float(bool(r["score"]["end_to_end_match"])))
+            row["by_behavior"] = {k: statistics.mean(v) for k, v in sorted(byb.items())}
             row["ToolEM"] = statistics.mean(float(bool(r["score"].get("all_match"))) for r in recs)
             row["ResourceEM"] = statistics.mean(float(bool(r["score"].get("resource_exact_match"))) for r in recs)
             row["agent_turns"] = statistics.mean(r["score"].get("agent_turns", 0) for r in recs)
@@ -96,6 +100,8 @@ def markdown(rows: list[dict], dataset: str) -> str:
         extra = r.get("by_case") or r.get("by_difficulty")
         if extra:
             out.append(f"\n{r['method']}: " + ", ".join(f"{k}={v:.2f}" for k, v in extra.items()))
+        if r.get("by_behavior"):
+            out.append(f"{r['method']} by behavior: " + ", ".join(f"{k}={v:.2f}" for k, v in r["by_behavior"].items()))
     return "\n".join(out)
 
 
@@ -105,8 +111,10 @@ def main():
     p.add_argument("--reference", default=None)
     p.add_argument("--dataset", choices=["hoosier", "ngqa"], required=True)
     p.add_argument("--out", required=True)
+    p.add_argument("--exclude-behaviors", default="", help="comma list of simulated-user behaviors to leave out (e.g. self_contradictory)")
     a = p.parse_args()
-    runs = [load_run(r) for r in a.runs.split(",")]
+    excl = tuple(x for x in a.exclude_behaviors.split(",") if x)
+    runs = [load_run(r, excl) for r in a.runs.split(",")]
     ref = next((r for r in runs if r["path"].endswith(a.reference.rstrip("/").split("/")[-1])), None) if a.reference else None
     rows = table_rows(runs, ref, a.dataset)
     out = Path(a.out) if Path(a.out).is_absolute() else RUNS / a.out

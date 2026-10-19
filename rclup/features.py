@@ -72,6 +72,12 @@ class Featurized:
     cand_meta: list[tuple[float, float, float]] | None = None  # (weight, greedy, unresolved) per receiver candidate
 
 
+# Controller-input ablations (set from --ablate in train/run_episodes; identical at training and deployment):
+#   "dependency": zero the dependency-aware attention features and packet/graph relation summaries;
+#   "receiver_state": zero the receiver's task-state vector (the controller no longer sees what the receiver has to do).
+ABLATION: set[str] = set()
+
+
 def build_features(data: dict, pooled: list[torch.Tensor] | None = None, null_slot: torch.Tensor | None = None,
                    m: int = M_SLOTS) -> Featurized:
     """Tensors for the carrier. `pooled[i]` are the [m, d] slots per sender candidate row (None -> null slots)."""
@@ -117,11 +123,19 @@ def build_features(data: dict, pooled: list[torch.Tensor] | None = None, null_sl
     graph = torch.tensor([float(n_p), float(len(set(origins))), float(max(len(a) for a in ancestors)),
                           float(summ[:, 1].max()) if n_p else 0.0, float(sum(r == 0 for r in roles)), float(sum(r == 1 for r in roles)),
                           ent, float(data.get("external_budget_frac", 0.0))])
+    if "dependency" in ABLATION:
+        dep = torch.zeros_like(dep)
+        summ = torch.zeros_like(summ)
+        overlap = torch.ones_like(overlap)
+        graph[2:4] = 0.0
     rec = data["receiver"]
     cand_text = torch.stack([c["text_vec"].float() for c in rec["candidates"]])
+    state_vec = rec["state_vec"].float()
+    if "receiver_state" in ABLATION:
+        state_vec = torch.zeros_like(state_vec)
     batch = ReceiverBatch(latent=torch.stack(latents), text=torch.stack(texts), roles=torch.tensor(roles), missing=torch.tensor(missing),
                           weight=cand_weights, packet_id=torch.tensor(pids), dep=dep, packet_summary=summ, packet_overlap=overlap,
-                          graph=graph, state_vec=rec["state_vec"].float(), receiver_role=ROLE_IDS.get(rec["role"], 3), cand_text=cand_text)
+                          graph=graph, state_vec=state_vec, receiver_role=ROLE_IDS.get(rec["role"], 3), cand_text=cand_text)
     key_to_row = {}
     for i, sc in enumerate(slot_cands):
         key_to_row.setdefault(sc[1], i)

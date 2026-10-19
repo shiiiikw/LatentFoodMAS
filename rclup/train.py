@@ -228,9 +228,12 @@ def main():
     p.add_argument("--no-latent", action="store_true", help="control: rich text only (latent slots masked)")
     p.add_argument("--scalar", action="store_true", help="control: action-trained scalar controller")
     p.add_argument("--phase", default="A", choices=["A", "B", "C"])
+    p.add_argument("--ablate", default="", help="comma list of controller-input ablations: dependency, receiver_state")
     p.add_argument("--init", default=None, help="phase B/C: trained carrier checkpoint")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     a = p.parse_args()
+    from . import features as _F
+    _F.ABLATION.update(x for x in a.ablate.split(",") if x)
     if a.phase in ("B", "C"):
         return phase_bc(a)
     out = Path(a.out) if Path(a.out).is_absolute() else RUNS / a.out

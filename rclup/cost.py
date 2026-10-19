@@ -43,6 +43,10 @@ class CostLedger:
         if self.usd >= self.cap_usd:
             raise BudgetExceeded(f"OpenAI budget cap reached: ${self.usd:.2f} >= ${self.cap_usd:.2f} ({self.label})")
 
+    def record_cached(self, purpose: str = "npc") -> None:
+        """Count a cache-served simulated-user reply (no spend); kept in the ledger for reporting cache savings."""
+        self._cached = getattr(self, "_cached", 0) + 1
+
     def record(self, model: str, usage, purpose: str = "npc") -> float:
         base = model.split("-20")[0] if model.startswith("gpt-4.1") else model
         price = PRICES.get(base) or PRICES["gpt-4.1"]
