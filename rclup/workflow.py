@@ -1392,7 +1392,7 @@ class HoosierWorkflow(Workflow):
                 d = resume["forced"]
                 self.trace.add("decision", role="planner", decision=d.kind, candidate=d.candidate, forced=True,
                                question=None if d.question is None else d.question.__dict__, menu=[q.__dict__ for q in menu])
-                self.controller = ForcedController(d, self.seed)
+                self.controller = ForcedController(d, self.seed, getattr(self.controller, "inner", None))   # keep the branch continuation policy
                 self.controller.used = True
             else:
                 d = self.decide(ctx, pinv, snapshot)
@@ -1684,7 +1684,7 @@ class NGQAWorkflow(Workflow):
                 d = resume["forced"]
                 self.trace.add("decision", role="reasoner", decision=d.kind, candidate=d.candidate, forced=True,
                                question=None if d.question is None else d.question.__dict__, menu=[q.__dict__ for q in menu])
-                self.controller = ForcedController(d, self.seed)
+                self.controller = ForcedController(d, self.seed, getattr(self.controller, "inner", None))   # keep the branch continuation policy
                 self.controller.used = True
             else:
                 d = self.decide(ctx, rinv, snapshot)
