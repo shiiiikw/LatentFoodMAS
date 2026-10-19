@@ -482,8 +482,45 @@ class HoosierWorkflow(Workflow):
         for m in env.messages:
             if m["role"] != "user" or m["content"].startswith("Tool result for search_resources call"):
                 continue
-            out += [x.strip().lower() for x in re.split(r"(?<=[.!?;])\s+", self.normalize_contradiction(m["content"])) if x.strip()]
+            for sent in re.split(r"(?<=[.!?;])\s+", self.normalize_contradiction(m["content"])):
+                # clause level: 'For the family support, I need Thursday, and for the legal help, ...'
+                out += [x.strip().lower() for x in re.split(r",?\s+(?:and |but |while )?(?=for (?:the |my |both )?\w)", sent) if x.strip()]
         return out
+
+    def ground_category(self, env, needs: list[dict]) -> bool:
+        """Task module: the service category must be supported by the person's words. If the chosen category's keywords
+        never occur but exactly one other category's keywords do (e.g. 'substance use' read as Disability and
+        Rehabilitation), switch to that category. Categories already taken by the other need are excluded."""
+        text = " ".join(self._user_sentences(env))
+        first = {}
+        for cat, kws in self.CATEGORY_KEYWORDS.items():
+            pos = [m.start() for k in kws for m in [re.search(k, text)] if m]
+            if pos:
+                first[cat] = min(pos)
+        taken = {n["service_categories"][0] for n in needs if isinstance(n["service_categories"], list) and n["service_categories"] and n["service_categories"][0] in first}
+        changed = False
+        for n in needs:   # needs are numbered in order of mention, so unsupported needs take unclaimed categories by first mention
+            cat = n["service_categories"][0] if isinstance(n["service_categories"], list) and n["service_categories"] else None
+            if cat is None or cat in first:
+                continue
+            cands = sorted((pos, c) for c, pos in first.items() if c not in taken)
+            if cands:
+                self.trace.add("category_grounding", need_id=n["need_id"], old=cat, new=cands[0][1])
+                n["service_categories"] = [cands[0][1]]
+                taken.add(cands[0][1])
+                changed = True
+        return changed
+
+    @staticmethod
+    def _time_patterns(hhmm: str) -> tuple:
+        m = re.fullmatch(r"(\d{1,2}):(\d{2})", hhmm or "")
+        if not m:
+            return ()
+        h, mm = int(m.group(1)), m.group(2)
+        forms = {f"{h}:{mm}", f"{h % 12 or 12}:{mm}", f"{h:02d}:{mm}"}
+        if mm == "00":
+            forms |= {f"{h % 12 or 12}\s*(am|pm|o'clock)", f"{h}\s*(am|pm)"}
+        return tuple(r"\b" + f + r"\b" for f in forms)
 
     def ground_binding(self, env, needs: list[dict]) -> bool:
         """Task module (composite needs): a concrete intake-method / weekday value attached to need A must be supported by a
@@ -508,11 +545,24 @@ class HoosierWorkflow(Workflow):
                         checks.append(("intake_methods", pats))
             if isinstance(n.get("schedule"), dict) and n["schedule"].get("day") in self.VALUE_LITERALS["day"]:
                 checks.append(("schedule", self.VALUE_LITERALS["day"][n["schedule"]["day"]]))
+            if isinstance(n.get("schedule"), dict):
+                for tk in ("start_time", "end_time", "time"):
+                    pats = self._time_patterns(n["schedule"].get(tk, ""))
+                    if pats:
+                        checks.append(("schedule_time", pats))
             for f, pats in checks:
                 hits = [s for s in sents if any(re.search(p, s) for p in pats)]
                 if not hits:
                     continue
                 if all(any(re.search(k, s) for k in other) and not any(re.search(k, s) for k in mine) and not generic.search(s) for s in hits):
+                    if f == "schedule_time":
+                        # the window belongs to the other need: keep the day, drop the times
+                        if not isinstance(n["schedule"], dict):
+                            continue
+                        n["schedule"] = {k: v for k, v in n["schedule"].items() if k not in ("start_time", "end_time", "time")} or R.NONE
+                        self.trace.add("binding_grounding", need_id=n["need_id"], field="schedule_time", dropped=True)
+                        changed = True
+                        continue
                     was_asked = (n["need_id"], f) in self.asked or ("*", f) in self.asked
                     n[f] = R.NONE if was_asked else R.UNKNOWN
                     changed = True
@@ -589,6 +639,7 @@ class HoosierWorkflow(Workflow):
                         if n[f] != action:
                             n[f] = action
                             changed = True
+            changed = self.ground_category(env, art["needs"]) or changed
             if len(art["needs"]) == 2:
                 changed = self.ground_binding(env, art["needs"]) or changed
             if changed:
