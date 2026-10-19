@@ -24,6 +24,7 @@ from . import roles as R
 
 S_DRAWS = 8
 PROPOSAL_MAX_TOKENS = 512
+T_FB = 4   # turns a fallback path needs after the last ordinary question: search, relaxation question, re-search, final
 Q_MAX = 6
 
 
@@ -140,9 +141,11 @@ class VOIController(Controller):
             g_val = fv.get((greedy.key, q.qid))
             value = 0.0
             if q.scope.get("pairs") is not None:
-                # budget-aware VOI (train priors only): asking pays off when the asked fields are probably real constraints;
-                # it costs a turn that is lost exactly when a fallback search will be needed
-                gains.append(ctx.aux.get("prior", {}).get(q.qid, 0.0) - ctx.aux.get("p_fallback", 0.0))
+                # budget-aware VOI (train priors, no learning): gain = P(the asked fields are real constraints); cost = P(a fallback
+                # search will be needed) charged only when, after this question, the remaining turns could no longer cover the
+                # fallback path (search, relaxation question, re-search, final = T_FB turns)
+                cost = ctx.aux.get("p_fallback", 0.0) if (ctx.external_left - 1) < T_FB else 0.0
+                gains.append(ctx.aux.get("prior", {}).get(q.qid, 0.0) - cost)
                 continue
             for c in pk.candidates:
                 if c.is_unresolved or c.key == greedy.key:

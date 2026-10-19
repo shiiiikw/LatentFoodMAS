@@ -196,7 +196,7 @@ class CarrierRuntime:
         return rows
 
     def featurize(self, ctx) -> Featurized:
-        data = encode_context(ctx, self.text)
+        data = encode_context(ctx, self.text, external_budget_frac=ctx.external_left / 8.0)   # same scaling as the label collector
         if not hasattr(self.carrier, "pool_candidate"):
             return build_features(data, None, torch.zeros(M_SLOTS, 256))
         return build_features(data, self.pooled_rows(data), self.carrier.pooler.null.detach().cpu())

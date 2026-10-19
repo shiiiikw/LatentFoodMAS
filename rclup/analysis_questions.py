@@ -63,7 +63,9 @@ def rule_pick(rule: str, rec: dict, aux: dict, scores: dict | None) -> tuple[str
         vals = []
         for q in menu:
             if (q.get("scope") or {}).get("pairs") is not None:   # v6 group question: budget-aware rule (train priors)
-                vals.append(aux.get("prior", {}).get(q["qid"], 0.0) - aux.get("p_fallback", 0.0))
+                from .workflow import T_FB
+                cost = aux.get("p_fallback", 0.0) if (aux.get("turns_left", 8) - 1) < T_FB else 0.0
+                vals.append(aux.get("prior", {}).get(q["qid"], 0.0) - cost)
                 continue
             g_sig, g_val = sig.get(greedy_key), fv.get((greedy_key, q["qid"]))
             v = sum(w for k, w in weights.items() if k != greedy_key and fv.get((k, q["qid"])) != g_val and sig.get(k) != g_sig)

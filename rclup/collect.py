@@ -70,7 +70,7 @@ class Collector:
         seed = 1000 + index
         policy = Pi0Controller(seed) if index % 2 == 0 else RoundRobinMenuController(seed)
         prefixes: list[dict] = []
-        env = make_env(self.dataset, root, self.ledger, self.disclosure)
+        env = make_env(self.dataset, root, self.ledger, self.disclosure, getattr(self, "max_turns", None))
         wf = self.WF(self.bb, policy, seed=seed, encoder=self.encoder, items_budget=self.items_budget)
         if hasattr(wf, "set_variant"):
             wf.set_variant(self.variant)
@@ -242,6 +242,7 @@ def main():
     p.add_argument("--disclosure", default="half", choices=["half", "none", "full"])
     p.add_argument("--min-statuses", type=int, default=0)
     p.add_argument("--variant", default="v5", choices=["v1", "v2", "v3", "v4", "v5", "v5nofb", "v6"], help="HoosierHelp workflow preset used while collecting")
+    p.add_argument("--max-turns", type=int, default=None, help="HoosierHelp agent-turn cap while collecting (budget-pressure labels)")
     p.add_argument("--out", required=True)
     p.add_argument("--ledger", default=str(RUNS / "ledger_validation.json"))
     p.add_argument("--cap-usd", type=float, default=40.0)
@@ -259,6 +260,7 @@ def main():
     col = Collector(a.dataset, bb, encoder, ledger, out, tuple(int(s) for s in a.seeds.split(",")), a.max_commits, a.max_questions,
                     a.prefixes_per_root, a.items_budget, a.disclosure)
     col.variant = a.variant
+    col.max_turns = a.max_turns
     start = time.monotonic()
     usd0 = ledger.usd
     with ThreadPoolExecutor(max_workers=a.workers) as ex:
