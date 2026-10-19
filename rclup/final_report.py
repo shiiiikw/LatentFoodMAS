@@ -22,7 +22,7 @@ def load(path: str) -> dict | None:
     d = RUNS / path
     if not (d / "records.jsonl").exists():
         return None
-    recs = [r for r in read_jsonl(d / "records.jsonl") if "error" not in r]
+    recs = read_jsonl(d / "records.jsonl")   # errored episodes count as failures
     def key(r):
         rid = r.get("root_id") or f"hoosier:eval:{r.get('user_spec_id', '')}"
         return rid + "|" + (r.get("behavior") or r.get("user_behavior") or "")
@@ -30,7 +30,7 @@ def load(path: str) -> dict | None:
 
 
 def em(r) -> float:
-    return float(bool(r["score"]["end_to_end_match"]))
+    return float(bool((r.get("score") or {}).get("end_to_end_match")))
 
 
 def rate(run: dict, keys) -> str:
@@ -72,7 +72,7 @@ def main():
                 continue
             recs = list(run.values())
             def r_(bs):
-                xs = [float(bool(r["score"].get("end_to_end_match"))) for r in recs if r["user_behavior"] in bs]
+                xs = [em(r) for r in recs if r["user_behavior"] in bs]
                 return f"{statistics.mean(xs):.3f} (n={len(xs)})" if xs else "—"
             out.append(f"| {label} | {r_(B4)} | {r_(BEH)} | {r_(('self_contradictory',))} |")
             continue
@@ -92,7 +92,7 @@ def main():
         if run is None or v5 is None:
             out.append(f"| {label} | (pending) | | | | |")
             continue
-        asks = sum(1 for r in run.values() for e in r.get("trace", []) if e.get("kind") == "clarification" and "user_reply" in e)
+        asks = sum(1 for r in run.values() for e in (r.get("trace") or []) if e.get("kind") == "clarification" and "user_reply" in e)
         out.append(f"| {label} | {rate(run, k4)} | {paired(run, v5, k4)} | {rate(run, allk)} | {paired(run, v5, allk)} | {asks} |")
     if v5:
         out.append("\n## HoosierHelp v5 — by behavior and by case (text controller)\n")
