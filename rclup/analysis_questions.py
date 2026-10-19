@@ -62,6 +62,9 @@ def rule_pick(rule: str, rec: dict, aux: dict, scores: dict | None) -> tuple[str
     if rule == "voi_det":
         vals = []
         for q in menu:
+            if (q.get("scope") or {}).get("pairs") is not None:   # v6 group question: budget-aware rule (train priors)
+                vals.append(aux.get("prior", {}).get(q["qid"], 0.0) - aux.get("p_fallback", 0.0))
+                continue
             g_sig, g_val = sig.get(greedy_key), fv.get((greedy_key, q["qid"]))
             v = sum(w for k, w in weights.items() if k != greedy_key and fv.get((k, q["qid"])) != g_val and sig.get(k) != g_sig)
             if g_val == "unknown":
@@ -145,15 +148,35 @@ def main():
     # question categories from labels: for each menu question, does asking beat the best commit?
     cat = collections.Counter()
     per_rule = {r: collections.defaultdict(list) for r in rules}
+    # reviewer situations: (S1) disagreement whose alternatives lead to the same outcome, (S2) disagreement that changes the
+    # outcome, (S3) an unknown fact spanning several needs, (S4) an unknown fact for one need, (S5) confirmations
+    def situation(q, aux):
+        sc = q.get("scope") or {}
+        if sc.get("pairs") is not None:
+            return "S3 unknown, multi-need" if len({nid for nid, _ in sc["pairs"]}) > 1 else "S4 unknown, single need"
+        if q["b"] != "__residual__":
+            sig = aux.get("signature", {})
+            return "S1 disagreement, same outcome" if sig.get(q["a"]) == sig.get(q["b"]) else "S2 disagreement, outcome changes"
+        return "S5 unknown/confirm (single field)"
+    sit_n, sit_useful = collections.Counter(), collections.Counter()
+    sit_ask = {r: collections.Counter() for r in rules}
+    sit_ask_useful = {r: collections.Counter() for r in rules}
     for i, rec in enumerate(recs):
         st = oracle_stats(rec)
         menu = rec["data"]["menu"]
         useful = {q: g > 0 for q, g in st["gains"].items()}
         any_useful = any(useful.values())
+        qsit = {}
         for q in menu:
             cat[("useful" if useful.get(q["qid"]) else "useless", "disagreement" if q["b"] != "__residual__" else "unknown/confirm")] += 1
+            qsit[q["qid"]] = situation(q, aux_all[i])
+            sit_n[qsit[q["qid"]]] += 1
+            sit_useful[qsit[q["qid"]]] += bool(useful.get(q["qid"]))
         for r in rules:
             kind, qid = rule_pick(r, rec, aux_all[i], learned[r.split(":", 1)[1]][i] if r.startswith("learned:") else None)
+            if kind == "ask" and qid in qsit:
+                sit_ask[r][qsit[qid]] += 1
+                sit_ask_useful[r][qsit[qid]] += bool(useful.get(qid))
             y = rec["y_ask"].get(qid, st["greedy"]) if kind == "ask" else st["greedy"]
             s = per_rule[r]
             s["regret"].append(y - st["oracle"])
@@ -179,6 +202,15 @@ def main():
     for row in table:
         md.append("| " + " | ".join("" if row[c] is None else (f"{row[c]:.3f}" if isinstance(row[c], float) else str(row[c])) for c in cols) + " |")
     md.append(f"\nquestion categories: {dict(cat)}; oracle error {statistics.mean(oracle_stats(r)['oracle'] for r in recs):.3f}")
+    # situation table: how often each rule spends its question on each situation, and how often that question was useful
+    sits = sorted(sit_n)
+    md.append("\n| situation | menu items | useful (label) | " + " | ".join(f"{r} asks (useful)" for r in rules) + " |")
+    md.append("|---|---|---|" + "---|" * len(rules))
+    for sname in sits:
+        cells = [f"{sit_ask[r][sname]} ({sit_ask_useful[r][sname]})" for r in rules]
+        md.append(f"| {sname} | {sit_n[sname]} | {sit_useful[sname] / max(1, sit_n[sname]):.2f} | " + " | ".join(cells) + " |")
+    (out / "situations.json").write_text(json.dumps({"n": sit_n, "useful": sit_useful, "asks": {r: dict(v) for r, v in sit_ask.items()},
+                                                       "asks_useful": {r: dict(v) for r, v in sit_ask_useful.items()}}, indent=1))
     (out / "table.md").write_text("\n".join(md) + "\n")
     print("\n".join(md))
 

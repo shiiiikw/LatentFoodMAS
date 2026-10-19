@@ -71,10 +71,10 @@ def load_roots(dataset: str, split: str, limit: int | None, seed: int = 0, diffi
     return rows[:limit] if limit else rows
 
 
-def make_env(dataset: str, root: dict, ledger: CostLedger, disclosure: str = "half"):
+def make_env(dataset: str, root: dict, ledger: CostLedger, disclosure: str = "half", max_turns: int | None = None):
     if dataset == "hoosier":
-        from .envs.hoosier_env import HoosierEnv
-        return HoosierEnv(root, root.get("behavior", "normal"), ledger)
+        from .envs.hoosier_env import HoosierEnv, MAX_AGENT_TURNS
+        return HoosierEnv(root, root.get("behavior", "normal"), ledger, max_agent_turns=max_turns or MAX_AGENT_TURNS)
     from .envs.ngqa_env import NGQAEnv
     return NGQAEnv(root, ledger, disclosure=disclosure)
 
@@ -121,8 +121,11 @@ def main():
     p.add_argument("--behaviors", default="normal")
     p.add_argument("--disclosure", default="half", choices=["half", "none", "full"])
     p.add_argument("--min-statuses", type=int, default=0)
-    p.add_argument("--variant", default="v4", choices=["v1", "v2", "v3", "v4", "v5", "v5nofb"], help="HoosierHelp module ablation preset")
+    p.add_argument("--variant", default="v4", choices=["v1", "v2", "v3", "v4", "v5", "v5nofb", "v6"], help="HoosierHelp module ablation preset")
     p.add_argument("--ablate", default="", help="comma list of controller-input ablations (must match training): dependency, receiver_state")
+    p.add_argument("--max-turns", type=int, default=None, help="HoosierHelp agent-turn cap (native 8); budget sweep")
+    p.add_argument("--intake-policy", default="three", choices=["three", "two", "skip_docs"],
+                   help="ordinary intake questions: three low-burden groups (native), two messages (location; rest), or three groups minus documents/eligibility")
     p.add_argument("--out", required=True)
     p.add_argument("--ledger", default=str(RUNS / "ledger_validation.json"))
     p.add_argument("--cap-usd", type=float, default=40.0)
@@ -152,13 +155,17 @@ def main():
         key = root["root_id"] + "|" + root.get("behavior", "")
         if key in done:
             return None
-        env = make_env(a.dataset, root, ledger, a.disclosure)
+        env = make_env(a.dataset, root, ledger, a.disclosure, a.max_turns)
         if learned is not None:
             wf = WF(bb, learned, seed=a.seed, items_budget=a.items_budget, encoder=encoder, carrier=runtime)
         else:
             wf = WF(bb, CONTROLLERS[a.controller](a.seed), seed=a.seed, items_budget=a.items_budget)
         if hasattr(wf, "set_variant"):
             wf.set_variant(a.variant)
+            if a.intake_policy == "two":
+                wf.intake_groups = (("location",), ("schedule", "intake_methods", "available_documents", "eligibility"))
+            elif a.intake_policy == "skip_docs":
+                wf.skip_fields = ("available_documents", "eligibility")
         try:
             rec = wf.run(env)
         except BudgetExceeded:
@@ -191,6 +198,7 @@ def main():
     all_records = read_jsonl(records_path)
     summary = summarize(all_records, a.dataset)
     summary.update({"controller": a.controller, "dataset": a.dataset, "split": a.split, "items_budget": a.items_budget, "lam": a.lam, "disclosure": a.disclosure, "variant": a.variant,
+                    "max_turns": a.max_turns, "intake_policy": a.intake_policy,
                     "carrier": a.carrier, "calibrator": a.calibrator,
                     "wall_seconds": time.monotonic() - start, "openai_usd_this_run": ledger.usd - usd0,
                     "openai_usd_ledger_total": ledger.usd, "gen_usage": bb.usage_dict()})

@@ -139,6 +139,11 @@ class VOIController(Controller):
             g_sig = sig.get(greedy.key)
             g_val = fv.get((greedy.key, q.qid))
             value = 0.0
+            if q.scope.get("pairs") is not None:
+                # budget-aware VOI (train priors only): asking pays off when the asked fields are probably real constraints;
+                # it costs a turn that is lost exactly when a fallback search will be needed
+                gains.append(ctx.aux.get("prior", {}).get(q.qid, 0.0) - ctx.aux.get("p_fallback", 0.0))
+                continue
             for c in pk.candidates:
                 if c.is_unresolved or c.key == greedy.key:
                     continue
@@ -373,14 +378,22 @@ class HoosierWorkflow(Workflow):
         self.prune_on_answer = False  # candidate-indexed clarification: an evidence-resolved answer prunes the sender's candidates instead of re-proposing
         self.user_direct = True  # disagreement/unknown questions go to the person directly (the evidence is ambiguous by construction)
         self.use_relaxation = True  # counterfactual relaxation diagnosis after empty results
+        self.intake_groups = R.INTAKE_GROUPS   # question grouping for ordinary intake (three low-burden messages by default)
+        self.skip_fields: tuple = ()           # ordinary-intake fields never asked (treated as no constraint): budget policy ablation
 
     def set_variant(self, variant: str) -> None:
         """Module ablation presets: v1 = none of the new modules, v2 = +relaxation diagnosis, v3 = +deterministic planner,
         v4 = +direct-to-user disagreement/unknown questions, v5 = v4 + no re-proposal on evidence-only answers (candidate pruning)."""
         presets = {"v1": (False, True, True, False, False), "v2": (True, True, True, False, False), "v3": (True, False, True, False, False),
-                   "v4": (True, False, False, True, False), "v5": (True, False, False, True, True), "v5nofb": (True, False, False, True, True)}
+                   "v4": (True, False, False, True, False), "v5": (True, False, False, True, True), "v5nofb": (True, False, False, True, True),
+                   "v6": (True, False, False, True, True)}
         self.use_relaxation, self.llm_planner, self.confirmation_questions, self.user_direct, self.prune_on_answer = presets[variant]
         self.fallback_clarification = variant != "v5nofb"   # ablation: never ask the person to relax a constraint after an empty search
+        # v6: ordinary intake questions are no longer a fixed rule; they enter the controller's menu as group questions
+        # ("ask the person about <fields> for <needs>") and committing treats unknown fields as no constraint. The turn budget
+        # makes every question costly, so which questions are worth asking becomes the controller's decision.
+        self.budget_questions = variant == "v6"
+        self.priors = self._group_priors() if self.budget_questions else {}
         self.contradiction_clarification = variant not in ("v5nofb",) and getattr(self, "contradiction_clarification", True)
         self.last_fallback_request = None
         self.fallback_overrides = {}
@@ -388,6 +401,33 @@ class HoosierWorkflow(Workflow):
         index = _Native.load()["index"]
         self.known_counties = {c.upper() for r in index.resources for c in (r.counties or ())}
         self.known_cities = {str(r.city).upper() for r in index.resources if getattr(r, "city", None)}
+
+    _PRIORS = None
+
+    def _group_priors(self) -> dict:
+        """Train-split priors for the budget-aware VOI rule: P(a need has a constraint in each intake question group) and
+        P(the spec needs a fallback search). Computed once from train_specs (never from the test split)."""
+        if HoosierWorkflow._PRIORS is None:
+            from .common import DATA, read_jsonl, ensure_vendor_on_path
+            ensure_vendor_on_path()
+            from eval import runner
+            rows = [r for r in read_jsonl(DATA / "hoosier" / "train_specs.jsonl") if r.get("split") != "test"]   # all train partitions
+            keys = {"location": ("counties", "cities", "zipcodes"), "schedule": ("schedule",), "intake_methods": ("intake_methods",),
+                    "available_documents": ("available_documents",), "eligibility": ("eligibility",)}
+            hits, n = collections.Counter(), 0
+            for r in rows:
+                for e in runner.expected_tool_calls(r):
+                    n += 1
+                    for f, ks in keys.items():
+                        if any(e.get(k) for k in ks):
+                            hits[f] += 1
+            HoosierWorkflow._PRIORS = {"field": {f: hits[f] / max(1, n) for f in keys},
+                                       "fallback": sum(r.get("constraint_profile") == "fallback_required" for r in rows) / max(1, len(rows)), "n_needs": n}
+        return HoosierWorkflow._PRIORS
+
+    @staticmethod
+    def _assume_none(need: dict) -> dict:
+        return {k: (R.NONE if (k in R.FIELDS and v in (R.UNKNOWN, R.EMPTY)) else v) for k, v in need.items()}
 
     # ----- prompts -----
     DENIAL_RE = re.compile(r",?\s*\b(but|however|although|though)\b\s+(I|we)\s+(cannot|can't|can not|am not able to|won't|do not|don't)\b[^.?!;]*", re.I)
@@ -597,7 +637,7 @@ class HoosierWorkflow(Workflow):
                     if n[f] == R.UNKNOWN and self.asked_count.get((n["need_id"], f), 0) + self.asked_count.get(("*", f), 0) >= 2:
                         n[f] = R.NONE   # asked twice and still nothing concrete: treat as no constraint instead of asking a third time
                         changed = True
-                    elif n[f] == R.NONE and not was_asked:
+                    elif n[f] == R.NONE and not was_asked and f not in self.skip_fields:
                         n[f] = R.UNKNOWN
                         changed = True
                 loc = n["location"]
@@ -637,6 +677,10 @@ class HoosierWorkflow(Workflow):
                     if cleaned != sch:
                         n["schedule"] = cleaned if cleaned else R.UNKNOWN
                         changed = True
+                for f in self.skip_fields:   # budget policy ablation: never asked (applied after grounding), assume no constraint
+                    if n[f] in (R.UNKNOWN, R.EMPTY):
+                        n[f] = R.NONE
+                        changed = True
                 # fallback resolution overrides (ordinary repair, applied to every candidate)
                 for (need_id, f), action in (self.fallback_overrides or {}).items():
                     if need_id in (n["need_id"], "*") and action is not None:
@@ -671,7 +715,7 @@ class HoosierWorkflow(Workflow):
                 continue
             programs = []
             for n in c.artifact["needs"]:
-                args = R.intake_to_search_args(n)
+                args = R.intake_to_search_args(self._assume_none(n) if self.budget_questions else n)
                 if args is None:
                     programs = []
                     break
@@ -751,13 +795,16 @@ class HoosierWorkflow(Workflow):
         (resource ids per need, or 'unresolved'), the value each interpretation assigns to every menu field, and the
         task's fixed field order."""
         ind, index = env.n["indiana211"], env.n["index"]
+        # offline analysis calls this with self=None: budget mode is recognisable from the menu (group questions)
+        budget = getattr(self, "budget_questions", False) or any(q.scope.get("pairs") is not None for q in menu)
+        priors = (getattr(self, "priors", None) or HoosierWorkflow._group_priors(None)) if budget else {}
         signature, field_value = {}, {}
         for c in packet.candidates:
             if c.is_unresolved:
                 continue
             sig = []
             for n in c.artifact["needs"]:
-                args = R.intake_to_search_args(n)
+                args = R.intake_to_search_args(HoosierWorkflow._assume_none(n) if budget else n)
                 if args is None:
                     sig.append("unresolved")
                 else:
@@ -765,13 +812,25 @@ class HoosierWorkflow(Workflow):
                     sig.append(tuple(sorted(r.get("resource_id", r.get("id", str(r))) if isinstance(r, dict) else str(r) for r in res)))
             signature[c.key] = tuple(sig)
             for q in menu:
+                if q.scope.get("pairs") is not None:   # group question: unknown if any of its (need, field) pairs is unknown here
+                    vals = [n.get(f) for nid, f in q.scope["pairs"] for n in c.artifact["needs"] if n["need_id"] == nid]
+                    field_value[(c.key, q.qid)] = "unknown" if any(v in (R.UNKNOWN, R.EMPTY) for v in vals) else json.dumps(vals, sort_keys=True)
+                    continue
                 need = next((n for n in c.artifact["needs"] if n["need_id"] == q.scope.get("need_id")), None)
                 v = need.get(q.scope["field"]) if need is not None else "missing"
                 field_value[(c.key, q.qid)] = "unknown" if v in (R.UNKNOWN, R.EMPTY) else json.dumps(v, sort_keys=True)
         fields = ("service_categories",) + R.FIELDS
-        order = {q.qid: (q.scope.get("need_id", ""), fields.index(q.scope["field"]) if q.scope.get("field") in fields else 99) for q in menu}
+        order = {q.qid: (("", q.scope["group"]) if q.scope.get("pairs") is not None else
+                         (q.scope.get("need_id", ""), fields.index(q.scope["field"]) if q.scope.get("field") in fields else 99)) for q in menu}
         rank = {qid: i for i, (qid, _) in enumerate(sorted(order.items(), key=lambda kv: kv[1]))}
-        return {"signature": signature, "field_value": field_value, "field_order": rank}
+        prior = {}
+        if budget:
+            pf = priors.get("field", {})
+            for q in menu:
+                if q.scope.get("pairs") is not None:
+                    prior[q.qid] = max(pf.get(f, 0.0) for _, f in q.scope["pairs"])   # P(some asked field is a real constraint)
+        return {"signature": signature, "field_value": field_value, "field_order": rank, "prior": prior,
+                "p_fallback": priors.get("fallback", 0.0), "turns_left": env.turns_left}
 
     # ----- task-specific module: atomic question menu over (need, field) distinctions -----
     def planner_menu(self, packet: Packet, asked: set[str], env=None) -> list[Question]:
@@ -813,10 +872,33 @@ class HoosierWorkflow(Workflow):
                     text = (f"For the {who} need, is {label} = {a_val} exactly what the person said (including whether they have no constraint)? "
                             "Quote the person's words; if the value is not supported, correct it or ask them.")
                     tiers[2].append(Question(qid, "intake", {"need_id": need_id, "field": f}, a_c[0].key, "__residual__", text, tier=2))
-        menu = tiers[0] + tiers[1] + (tiers[2] if self.confirmation_questions else [])
+        menu = tiers[0] + ([] if self.budget_questions else tiers[1]) + (tiers[2] if self.confirmation_questions else [])
+        if self.budget_questions:
+            menu = self.group_questions(packet, asked) + menu
         if env is not None and self.contradiction_clarification:
             menu = self.contradiction_questions(env, cands, asked) + menu
         return menu[:Q_MAX]
+
+    def group_questions(self, packet: Packet, asked: set[str]) -> list[Question]:
+        """v6 menu items: one question per ordinary-intake group still unknown in the greedy interpretation (asked to the
+        person in one low-burden message); each group may be asked at most twice. Costs a turn, not a budget item."""
+        g = packet.greedy.artifact
+        names = {n["need_id"]: (n["service_categories"][0] if isinstance(n["service_categories"], list) and n["service_categories"] else n["need_id"])
+                 for n in g["needs"]}
+        out = []
+        for gi, group in enumerate(self.intake_groups):
+            pairs = [(n["need_id"], f) for n in g["needs"] for f in group if n[f] in (R.UNKNOWN, R.EMPTY) and f not in self.skip_fields]
+            if not pairs:
+                continue
+            k = sum(1 for q in asked if q.startswith(f"*:group{gi}:"))
+            if k >= 2:
+                continue
+            labels = ", ".join(sorted({R.FIELD_LABEL.get(f, f) for _, f in pairs}))
+            needs = " and ".join(sorted({names[nid] for nid, _ in pairs}))
+            text = f"Ask the person about their {labels} for {needs} (currently unknown; committing assumes no constraint)."
+            out.append(Question(f"*:group{gi}:{k}", "intake", {"need_id": "*", "field": f"group{gi}", "group": gi, "pairs": pairs},
+                                packet.greedy.key, "__residual__", text, items=0, tier=1))
+        return out
 
     CONTRA_RE = re.compile(r"\b(but|however|although|though)\b[^.?!]{0,80}\b(can't|cannot|can not|not able|won't|don't|do not|isn't|is not|doesn't|does not|unavailable)\b", re.I)
     FIELD_WORDS = {"location": ("county", "city", "zip", "area", "town", "located", "location", "go to", "travel", "live"),
@@ -856,17 +938,21 @@ class HoosierWorkflow(Workflow):
 
     # ----- ordinary intake rule -----
     def ask_user_for_missing(self, env, artifact: dict) -> bool:
-        missing = R.intake_missing(artifact)
+        missing = [(n, f) for (n, f) in R.intake_missing(artifact) if f not in self.skip_fields]
         if not missing:
             return False
         first_field = missing[0][1]
-        group = next((g for g in R.INTAKE_GROUPS if first_field in g), (first_field,))
+        group = next((g for g in self.intake_groups if first_field in g), (first_field,))
         targets = [(n, f) for (n, f) in missing if f in group]
-        fields_text = ", ".join(sorted({R.FIELD_LABEL.get(f, f) for _, f in targets}))
         names = {}
         for n in artifact["needs"]:
             cats = n["service_categories"]
             names[n["need_id"]] = (cats[0] if isinstance(cats, list) and cats else "the service need")
+        self._ask_missing_targets(env, names, targets)
+        return True
+
+    def _ask_missing_targets(self, env, names: dict, targets: list[tuple[str, str]], kind_detail: str = "ordinary_intake") -> str:
+        fields_text = ", ".join(sorted({R.FIELD_LABEL.get(f, f) for _, f in targets}))
         needs_text = " and ".join(sorted({names.get(n, n) for n, _ in targets}))
         prompt = [{"role": "system", "content": self.native_prompt},
                   {"role": "user", "content": "Conversation so far:\n" + self._conversation_text(env) +
@@ -886,8 +972,8 @@ class HoosierWorkflow(Workflow):
         for n, f in targets:
             self.asked.add((n, f))
             self.asked_count[(n, f)] += 1
-        self.trace.add("user_question", kind_detail="ordinary_intake", fields=fields_text, text=text, reply=reply)
-        return True
+        self.trace.add("user_question", kind_detail=kind_detail, fields=fields_text, text=text, reply=reply)
+        return reply
 
     def diagnose_relaxation(self, env, programs: list[dict]) -> dict:
         """Counterfactual searches per need: which single relaxable constraint (location/schedule/intake), or pair,
@@ -1189,6 +1275,12 @@ class HoosierWorkflow(Workflow):
         return len(keep)
 
     def intake_ask_user_for(self, env, question: Question) -> str:
+        if question.scope.get("pairs") is not None:   # v6 group question: the ordinary low-burden intake message for that group
+            intake = next((i for i in reversed(self.invocations) if i.role == "intake"), None)
+            g = intake.packet.greedy.artifact if intake is not None else {"needs": []}
+            names = {n["need_id"]: (n["service_categories"][0] if isinstance(n["service_categories"], list) and n["service_categories"] else n["need_id"])
+                     for n in g.get("needs", [])}
+            return self._ask_missing_targets(env, names, [tuple(p) for p in question.scope["pairs"]], kind_detail="budget_intake")
         if question.qid.endswith(":contradiction"):
             # deterministic wording: point at the conflicting statement and ask for the actual fact
             m = re.search(r'\("(.*?)"\)\.', question.text)
@@ -1247,9 +1339,9 @@ class HoosierWorkflow(Workflow):
                     selected_intake = self._pi0_pick(inv.packet) if isinstance(self.controller, Pi0Controller) else inv.packet.greedy
                     inv.selected = inv.packet.candidates.index(selected_intake)
                     # ordinary rule: collect missing facts before searching (reserve 2 turns for search + final)
-                    if R.intake_missing(selected_intake.artifact) and env.turns_left > 2:
-                        self.ask_user_for_missing(env, selected_intake.artifact)
-                        continue
+                    if not self.budget_questions and R.intake_missing(selected_intake.artifact) and env.turns_left > 2:
+                        if self.ask_user_for_missing(env, selected_intake.artifact):
+                            continue
                     if env.turns_left < 2:
                         break
                 # --- receiver: planner ---

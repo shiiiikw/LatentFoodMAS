@@ -241,7 +241,7 @@ def main():
     p.add_argument("--difficulty", default=None)
     p.add_argument("--disclosure", default="half", choices=["half", "none", "full"])
     p.add_argument("--min-statuses", type=int, default=0)
-    p.add_argument("--variant", default="v5", choices=["v1", "v2", "v3", "v4", "v5", "v5nofb"], help="HoosierHelp workflow preset used while collecting")
+    p.add_argument("--variant", default="v5", choices=["v1", "v2", "v3", "v4", "v5", "v5nofb", "v6"], help="HoosierHelp workflow preset used while collecting")
     p.add_argument("--out", required=True)
     p.add_argument("--ledger", default=str(RUNS / "ledger_validation.json"))
     p.add_argument("--cap-usd", type=float, default=40.0)

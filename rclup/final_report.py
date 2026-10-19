@@ -157,6 +157,36 @@ def main():
         bd = s.get("by_difficulty", {})
         out.append(f"| {label} | {s['end_to_end_match']:.3f} | {bd.get('easy', 0):.2f} / {bd.get('medium', 0):.2f} / {bd.get('hard', 0):.2f} | {s.get('tag_f1', 0):.3f} | {rl:.3f} |")
     out.append("\nOriginal NGQA paper, best reported configuration (GPT-4o-mini + ToG): standard 0.86, complex 0.53.")
+    # ---------------- cost accounting (reviewer chain 3): offline labels vs online VOI vs no-ask, per-episode inference
+    out.append("\n## Cost accounting (HoosierHelp)\n")
+    out.append("| item | wall time | generation calls / completion tokens | simulated-user spend |\n|---|---|---|---|")
+    for label, path in (("v5 label collection (200 roots, 1 seed, ~2 prefixes/root)", "collect/hoosier_v5_repr"),
+                        ("v5 calibration labels (30 roots)", "collect/hoosier_v5_cal"),
+                        ("v6 label collection (200 roots)", "collect/hoosier_v6_repr"), ("v6 calibration labels (30 roots)", "collect/hoosier_v6_cal")):
+        sp = RUNS / path / "summary.json"
+        if not sp.exists():
+            out.append(f"| {label} | (pending) | | |")
+            continue
+        c = read_json(sp)
+        g = c.get("gen_usage", {})
+        out.append(f"| {label} | {c.get('wall_seconds', 0) / 60:.1f} min | {g.get('calls', 0)} / {g.get('completion_tokens', 0) / 1e6:.2f}M | ${c.get('openai_usd', 0):.2f} |")
+    for label, path in (("v5 controller training (A + C phases)", "models/hoosier5_A_richtext"), ("v6 controller training", "models/hoosier6_A_richtext")):
+        hp = RUNS / path / "history.json"
+        if hp.exists():
+            h = read_json(hp)
+            secs = sum(e.get("seconds", 0.0) for e in h.get("history", []))
+            out.append(f"| {label} | {secs:.0f} s (GPU, tiny model) | — | — |")
+    out.append("\n| controller (v5 / v6 eval, 240 episodes) | wall per episode | completion tokens per episode | user spend per episode | questions to person |\n|---|---|---|---|---|")
+    for label, path in (("v5 text (no asks)", "eval/final/hoosier_text_mas_b5"), ("v5 VOI (online search signatures)", "eval/final/hoosier_voi_det_b5"),
+                        ("v5 learned rich-text", "eval/final/hoosier_richtext_mc_b5"), ("v6 fixed order", "eval/v6/hoosier_fixed_order_b5"),
+                        ("v6 VOI (priors)", "eval/v6/hoosier_voi_det_b5"), ("v6 learned rich-text", "eval/v6/hoosier_richtext_mc_b5")):
+        sp = RUNS / path / "summary.json"
+        if not sp.exists():
+            out.append(f"| {label} | (pending) | | | |")
+            continue
+        c = read_json(sp)
+        n = max(1, c.get("n", 1)); g = c.get("gen_usage", {})
+        out.append(f"| {label} | {c.get('wall_seconds', 0) / n:.1f} s | {g.get('completion_tokens', 0) / n:.0f} | ${c.get('openai_usd_this_run', 0) / n:.4f} | {c.get('user_questions_avg', 0):.2f} |")
     # ---------------- spend
     led = RUNS / "ledger_validation.json"
     if led.exists():
