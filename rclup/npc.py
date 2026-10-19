@@ -119,11 +119,17 @@ class NGQAUser:
         d = self.root["opening_disclosure"]
         if self.disclosure == "none":
             return {"statuses": [], "habits": d["habits"]}
+        if self.disclosure == "full":
+            return {"statuses": list(self.root["private_profile"]["statuses"]), "habits": list(self.root["private_profile"]["habits"])}
         return d
 
     def opening(self) -> str:
         self.turn += 1
         d = self.disclosed()
+        if self.disclosure == "full":
+            # native knowledge-QA mode: the whole user record is given as text (no simulated user, no questions)
+            return (f"Question: is \"{self.root['food']['name']}\" healthy for this user?\n"
+                    f"User record: conditions and special diets: {d['statuses'] or 'none'}; dietary habits: {d['habits'] or 'none'}.")
         parts = [f"Hi, I'm wondering whether \"{self.root['food']['name']}\" is a healthy choice for me."]
         if d["statuses"]:
             parts.append("About me: " + "; ".join(_lay(s) for s in d["statuses"]) + ".")

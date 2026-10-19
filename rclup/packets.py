@@ -66,7 +66,8 @@ class Packet:
         return {"origin": self.origin, "version": self.version, "sender_role": self.sender_role,
                 "candidates": [c.public() for c in self.candidates], "residual_weight": round(self.residual_weight, 4),
                 "residual_count": self.residual_count, "invalid_count": self.invalid_count, "n_stochastic": self.n_stochastic,
-                "ancestors": list(self.ancestors), "sources": list(self.sources), "extra": self.extra}
+                "ancestors": list(self.ancestors), "sources": list(self.sources),
+                "extra": {k: v for k, v in self.extra.items() if isinstance(v, (str, int, float, bool, list, dict, type(None)))}}
 
     def readable(self, max_candidates: int = K_MAX, with_sources: bool = True) -> str:
         """Rich-text rendering shared by every method (candidates, support, provenance)."""

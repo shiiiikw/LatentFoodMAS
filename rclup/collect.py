@@ -173,7 +173,7 @@ def retarget(a):
             env0 = NGQAEnv.from_state(root, ledger, rec["env_state"])
         ws = rec["wf_state"]
         labels_star = {"ask": {}}
-        for q in rec["menu"]:
+        for q in rec["menu"][: a.max_questions]:
             qobj = Question(**q)
             runs = []
             for seed in seeds:
@@ -234,7 +234,7 @@ def main():
     p.add_argument("--items-budget", type=int, default=2)
     p.add_argument("--workers", type=int, default=6)
     p.add_argument("--difficulty", default=None)
-    p.add_argument("--disclosure", default="half", choices=["half", "none"])
+    p.add_argument("--disclosure", default="half", choices=["half", "none", "full"])
     p.add_argument("--min-statuses", type=int, default=0)
     p.add_argument("--out", required=True)
     p.add_argument("--ledger", default=str(RUNS / "ledger_validation.json"))

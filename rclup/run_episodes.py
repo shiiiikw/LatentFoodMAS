@@ -115,8 +115,9 @@ def main():
     p.add_argument("--items-budget", type=int, default=2)
     p.add_argument("--difficulty", default=None)
     p.add_argument("--behaviors", default="normal")
-    p.add_argument("--disclosure", default="half", choices=["half", "none"])
+    p.add_argument("--disclosure", default="half", choices=["half", "none", "full"])
     p.add_argument("--min-statuses", type=int, default=0)
+    p.add_argument("--variant", default="v4", choices=["v1", "v2", "v3", "v4"], help="HoosierHelp module ablation preset")
     p.add_argument("--out", required=True)
     p.add_argument("--ledger", default=str(RUNS / "ledger_validation.json"))
     p.add_argument("--cap-usd", type=float, default=40.0)
@@ -146,6 +147,8 @@ def main():
             wf = WF(bb, learned, seed=a.seed, items_budget=a.items_budget, encoder=encoder, carrier=runtime)
         else:
             wf = WF(bb, CONTROLLERS[a.controller](a.seed), seed=a.seed, items_budget=a.items_budget)
+        if hasattr(wf, "set_variant"):
+            wf.set_variant(a.variant)
         try:
             rec = wf.run(env)
         except BudgetExceeded:
@@ -177,7 +180,7 @@ def main():
                   f"items={rec.get('items_used')} err={'error' in rec} ${ledger.usd - usd0:.3f}", flush=True)
     all_records = read_jsonl(records_path)
     summary = summarize(all_records, a.dataset)
-    summary.update({"controller": a.controller, "dataset": a.dataset, "split": a.split, "items_budget": a.items_budget, "lam": a.lam, "disclosure": a.disclosure,
+    summary.update({"controller": a.controller, "dataset": a.dataset, "split": a.split, "items_budget": a.items_budget, "lam": a.lam, "disclosure": a.disclosure, "variant": a.variant,
                     "carrier": a.carrier, "calibrator": a.calibrator,
                     "wall_seconds": time.monotonic() - start, "openai_usd_this_run": ledger.usd - usd0,
                     "openai_usd_ledger_total": ledger.usd, "gen_usage": bb.usage_dict()})

@@ -35,6 +35,7 @@ class Question:
     b: str
     text: str
     items: int = 1
+    tier: int = 0          # 0 disagreement, 1 unknown, 2 confirmation
 
 
 @dataclass
@@ -290,6 +291,17 @@ class HoosierWorkflow(Workflow):
         self.roles = R.hoosier_roles(qwen_tool_schema(self.search_schema[0]), qwen_tool_schema(final_schema))
         self.native_prompt = native_agent_prompt()
         self.categories = service_categories()
+        from tools.curated_categories import SERVICE_CATEGORY_DESCRIPTIONS
+        self.category_help = "\n".join(f"- {c}: {SERVICE_CATEGORY_DESCRIPTIONS.get(c, '')}" for c in self.categories)
+        self.llm_planner = False  # ablation switch: deterministic planner mapping by default
+        self.confirmation_questions = False  # tier-2 confirmations off: evidence-resolved confirmations carry no new information
+        self.user_direct = True  # disagreement/unknown questions go to the person directly (the evidence is ambiguous by construction)
+        self.use_relaxation = True  # counterfactual relaxation diagnosis after empty results
+
+    def set_variant(self, variant: str) -> None:
+        """Module ablation presets: v1 = none of the new modules, v2 = +relaxation diagnosis, v3 = +deterministic planner, v4 = +direct questions."""
+        presets = {"v1": (False, True, True, False), "v2": (True, True, True, False), "v3": (True, False, True, False), "v4": (True, False, False, True)}
+        self.use_relaxation, self.llm_planner, self.confirmation_questions, self.user_direct = presets[variant]
         self.last_fallback_request = None
         self.fallback_overrides = {}
         from .envs.hoosier_env import _Native
@@ -315,7 +327,7 @@ class HoosierWorkflow(Workflow):
                         and not m["content"].startswith("Tool result for search_resources call")).lower()
 
     def intake_messages(self, env) -> list[dict]:
-        system = self.roles["intake"].task + "\n\nAllowed service_categories values: " + ", ".join(self.categories)
+        system = self.roles["intake"].task + "\n\nAllowed service_categories values (choose the closest):\n" + self.category_help
         user = "Conversation so far:\n" + self._conversation_text(env)
         note = getattr(self, "last_fallback_request", None)
         if note:
@@ -332,9 +344,12 @@ class HoosierWorkflow(Workflow):
                 f"Q: {r['question']}\nA: {r['answer']} (sources: person turns {r.get('sources')}; resolved={r.get('resolved')})" for r in replies)
         return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
-    def retriever_messages(self, opening: str, planner_packet: Packet, selected: Candidate, results: list[dict]) -> list[dict]:
+    def retriever_messages(self, opening: str, planner_packet: Packet, selected: Candidate, results: list[dict], diagnosis: dict | None = None) -> list[dict]:
         user = (f"Public opening from the person: {opening}\n\n{planner_packet.readable()}\n\nExecuted program: {selected.text}\n\n"
                 "Search results (JSON):\n" + json.dumps(results, ensure_ascii=False))
+        if diagnosis:
+            user += ("\n\nRelaxation diagnosis (resources returned per need if these constraints were dropped): "
+                     + json.dumps(diagnosis["report"]) + f"\nSmallest relaxations that make every need return resources: {diagnosis['minimal'][:3] or 'none'}")
         return [{"role": "system", "content": self.roles["retriever"].task}, {"role": "user", "content": user}]
 
     def recover_location(self, replies_text: str) -> dict | None:
@@ -405,6 +420,12 @@ class HoosierWorkflow(Workflow):
                 sch = n["schedule"]
                 if isinstance(sch, dict):
                     cleaned = {k: v for k, v in sch.items() if k not in ("time", "start_time", "end_time") or R.time_supported(v, text)}
+                    # a single time that is actually the start of a stated window becomes that window
+                    if "time" in cleaned:
+                        for a, b in R.time_ranges(replies_text):
+                            if cleaned["time"] == a:
+                                cleaned = {k: v for k, v in cleaned.items() if k != "time"} | {"start_time": a, "end_time": b}
+                                break
                     if cleaned != sch:
                         n["schedule"] = cleaned if cleaned else R.UNKNOWN
                         changed = True
@@ -428,6 +449,91 @@ class HoosierWorkflow(Workflow):
             else:
                 merged[c.key] = c
         packet.candidates = sorted(merged.values(), key=lambda c: (c.is_unresolved, not c.greedy, -c.count))
+
+    def planner_packet_from_intake(self, intake_packet: Packet, version: int) -> Packet:
+        """Deterministic planner: each resolved intake interpretation maps to exactly one search program, so the
+        planner's candidates are the images of the intake candidates (support inherited), plus UNRESOLVED."""
+        spec = self.roles["planner"]
+        groups: dict[str, dict] = {}
+        for c in intake_packet.candidates:
+            if c.is_unresolved:
+                continue
+            programs = []
+            for n in c.artifact["needs"]:
+                args = R.intake_to_search_args(n)
+                if args is None:
+                    programs = []
+                    break
+                programs.append({"need_id": n["need_id"], "arguments": args})
+            if not programs:
+                continue
+            try:
+                key, norm = spec.canon({"programs": programs})
+            except ValueError:
+                continue
+            g = groups.setdefault(key, {"artifact": norm, "count": 0, "weight": 0.0, "greedy": False, "sources": set(), "src": c})
+            g["count"] += c.count
+            g["weight"] += c.weight
+            g["greedy"] = g["greedy"] or c.greedy
+            g["sources"] |= set(c.sources)
+        cands = [Candidate(key=k, artifact=g["artifact"], text=spec.render(g["artifact"]), count=g["count"], weight=g["weight"],
+                           greedy=g["greedy"], rep_text=g["src"].rep_text, rep_logprob=g["src"].rep_logprob, sources=sorted(g["sources"]))
+                 for k, g in groups.items()]
+        cands.sort(key=lambda c: (not c.greedy, -c.count))
+        if not any(c.greedy for c in cands) and cands:
+            cands[0].greedy = True
+        cands.append(Candidate(key=UNRESOLVED_KEY, artifact={"unresolved": True},
+                               text="UNRESOLVED: the evidence does not support a search program yet.", is_unresolved=True))
+        total = sum(c.weight for c in cands if not c.is_unresolved)
+        return Packet(origin=f"planner#{version}", version=version, sender_role="planner", candidates=cands,
+                      residual_weight=max(0.0, 1.0 - total), residual_count=intake_packet.residual_count,
+                      invalid_count=0, n_stochastic=intake_packet.n_stochastic, ancestors=[intake_packet.origin], sources=list(intake_packet.sources))
+
+    def check_planner_packet(self, intake_packet: Packet, planner_packet: Packet) -> None:
+        """Programs may only use location literals and schedules that some intake interpretation states (no invention)."""
+        allowed = {"counties": set(), "cities": set(), "zipcodes": set()}
+        schedules = []
+        for c in intake_packet.candidates:
+            if c.is_unresolved:
+                continue
+            for n in c.artifact["needs"]:
+                loc = n["location"]
+                if isinstance(loc, dict):
+                    for k, vals in loc.items():
+                        allowed[k].update(v.upper() for v in vals)
+                if isinstance(n["schedule"], dict):
+                    schedules.append(n["schedule"])
+        spec = self.roles["planner"]
+        merged: dict[str, Candidate] = {}
+        for c in planner_packet.candidates:
+            if c.is_unresolved:
+                merged[c.key] = c
+                continue
+            art = copy.deepcopy(c.artifact)
+            changed = False
+            for prog in art["programs"]:
+                a = prog["arguments"]
+                for k in ("counties", "cities", "zipcodes"):
+                    kept = [v for v in a[k] if v.upper() in allowed[k]]
+                    if kept != a[k]:
+                        a[k] = kept
+                        changed = True
+                if a["schedule"] and a["schedule"] not in schedules:
+                    a["schedule"] = {}
+                    changed = True
+            if changed:
+                key, norm = spec.canon(art)
+                c.key, c.artifact, c.text = key, norm, spec.render(norm)
+            if c.key in merged:
+                m = merged[c.key]
+                m.count += c.count
+                m.weight += c.weight
+                m.greedy = m.greedy or c.greedy
+                if c.rep_logprob > m.rep_logprob:
+                    m.rep_text, m.rep_logprob, m.states, m.latent = c.rep_text, c.rep_logprob, c.states, c.latent
+            else:
+                merged[c.key] = c
+        planner_packet.candidates = sorted(merged.values(), key=lambda c: (c.is_unresolved, not c.greedy, -c.count))
 
     # ----- task-specific module: atomic question menu over (need, field) distinctions -----
     def planner_menu(self, packet: Packet, asked: set[str]) -> list[Question]:
@@ -460,16 +566,16 @@ class HoosierWorkflow(Workflow):
                     b_val, b_c = ordered[1]
                     text = (f"For the {who} need, which {label} applies: {a_val} or {b_val}? "
                             "Answer from what the person actually said; if they never said, ask them.")
-                    tiers[0].append(Question(qid, "intake", {"need_id": need_id, "field": f}, a_c[0].key, b_c[0].key, text))
+                    tiers[0].append(Question(qid, "intake", {"need_id": need_id, "field": f}, a_c[0].key, b_c[0].key, text, tier=0))
                 elif has_unknown:
                     text = (f"For the {who} need, what is the person's {label}? It is currently unknown. "
                             "Answer from what the person said; if they never said, ask them.")
-                    tiers[1].append(Question(qid, "intake", {"need_id": need_id, "field": f}, a_c[0].key, "__residual__", text))
+                    tiers[1].append(Question(qid, "intake", {"need_id": need_id, "field": f}, a_c[0].key, "__residual__", text, tier=1))
                 elif f != "service_categories":
                     text = (f"For the {who} need, is {label} = {a_val} exactly what the person said (including whether they have no constraint)? "
                             "Quote the person's words; if the value is not supported, correct it or ask them.")
-                    tiers[2].append(Question(qid, "intake", {"need_id": need_id, "field": f}, a_c[0].key, "__residual__", text))
-        menu = tiers[0] + tiers[1] + tiers[2]
+                    tiers[2].append(Question(qid, "intake", {"need_id": need_id, "field": f}, a_c[0].key, "__residual__", text, tier=2))
+        menu = tiers[0] + tiers[1] + (tiers[2] if self.confirmation_questions else [])
         return menu[:Q_MAX]
 
     # ----- ordinary intake rule -----
@@ -506,6 +612,42 @@ class HoosierWorkflow(Workflow):
         self.trace.add("user_question", kind_detail="ordinary_intake", fields=fields_text, text=text, reply=reply)
         return True
 
+    def diagnose_relaxation(self, env, programs: list[dict]) -> dict:
+        """Counterfactual searches per need: which single relaxable constraint (location/schedule/intake), or pair,
+        makes that need's program return resources. Deterministic; no agent turn consumed."""
+        import itertools
+        ind, index = env.n["indiana211"], env.n["index"]
+        fields = ("location", "schedule", "intake")
+        keys = {"location": ("counties", "cities", "zipcodes"), "schedule": ("schedule",), "intake": ("intake_methods",)}
+        report, per_need = {}, []
+        for i, prog in enumerate(programs):
+            found = []
+            if ind.execute_search_resources(index, prog, limit=env.tool_limit).get("resources"):
+                per_need.append([])
+                continue
+            for size in (1, 2, 3):
+                for combo in itertools.combinations(fields, size):
+                    args = copy.deepcopy(prog)
+                    for f in combo:
+                        for k in keys[f]:
+                            args[k] = {} if k == "schedule" else []
+                    n = len(ind.execute_search_resources(index, args, limit=env.tool_limit).get("resources") or [])
+                    report[f"need-{i + 1}:{'+'.join(combo)}"] = n
+                    if n > 0:
+                        found.append("+".join(combo))
+                if found:
+                    break
+            per_need.append(found)
+        # union of the per-need minimal relaxations (every alternative, so the person can pick the one they can change)
+        union = []
+        for found in per_need:
+            for combo in found:
+                for f in combo.split("+"):
+                    if f not in union:
+                        union.append(f)
+        minimal = ["+".join(union)] if union else []
+        return {"report": report, "per_need": per_need, "minimal": minimal}
+
     def ask_user_fallback(self, env, request: str) -> None:
         prompt = [{"role": "system", "content": self.native_prompt},
                   {"role": "user", "content": "Conversation so far:\n" + self._conversation_text(env) +
@@ -528,6 +670,7 @@ class HoosierWorkflow(Workflow):
             text2 = self.greedy_text(prompt2, purpose="fallback_followup")
             reply2 = env.ask_user(text2)
             more = self.resolve_fallback_reply(env, text2, reply2)
+            more = {k: v for k, v in more.items() if k in adjustable}  # the follow-up concerns only the adjustable fields
             for key in adjustable:
                 if key not in more and key in getattr(self, "_adjustable", []):
                     more[key] = R.NONE  # still vague after a direct follow-up: treat as no constraint
@@ -552,12 +695,18 @@ class HoosierWorkflow(Workflow):
                   {"role": "user", "content": f"Needs: {need_desc}\nAgent asked: {question_text}\nPerson replied: {reply}"}]
         obj = R.parse_json_object(self.greedy_text(prompt, purpose="fallback_resolve")) or {}
         overrides, adjustable = {}, []
+        lex = {"location": ("location", "county", "city", "zip", "area", "town", "place", "move", "travel", "elsewhere", "nearby"),
+               "schedule": ("schedule", "day", "time", "hour", "week", "morning", "afternoon", "evening", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday", "24"),
+               "intake_methods": ("intake", "method", "call", "phone", "email", "mail", "online", "walk", "person", "appointment", "text", "apply", "contact")}
+        mentioned = {f for f, words in lex.items() if any(w in (question_text + " " + reply).lower() for w in words)}
         for n in needs:
             entry = obj.get(n["need_id"]) if isinstance(obj.get(n["need_id"]), dict) else {}
             for f in ("location", "schedule", "intake_methods"):
                 action = entry.get(f, "keep")
                 if isinstance(action, str) and action.strip().lower() == "keep":
                     continue
+                if f not in mentioned:
+                    continue  # a field neither asked about nor mentioned cannot change
                 if isinstance(action, str) and action.strip().lower() in ("adjustable", "can change", "flexible"):
                     adjustable.append((n["need_id"], f))
                     continue
@@ -626,8 +775,27 @@ class HoosierWorkflow(Workflow):
                 if env.turns_left < 2:
                     break
                 # --- receiver: planner ---
-                pinv = self.invoke("planner", self.planner_messages(opening, inv.packet, st["replies"]), tools=self.roles["planner"].tools,
-                                   ancestors=[inv.inv_id], unresolved_text="UNRESOLVED: the evidence does not support a search program yet.", purpose="planner")
+                if self.llm_planner:
+                    pinv = self.invoke("planner", self.planner_messages(opening, inv.packet, st["replies"]), tools=self.roles["planner"].tools,
+                                       ancestors=[inv.inv_id], unresolved_text="UNRESOLVED: the evidence does not support a search program yet.", purpose="planner")
+                    self.check_planner_packet(inv.packet, pinv.packet)
+                else:
+                    version = self.next_version("planner")
+                    pkt = self.planner_packet_from_intake(inv.packet, version)
+                    if not any(not c.is_unresolved for c in pkt.candidates):
+                        # no fully resolved interpretation: fall back to the backbone planner
+                        pinv = self.invoke("planner", self.planner_messages(opening, inv.packet, st["replies"]), tools=self.roles["planner"].tools,
+                                           ancestors=[inv.inv_id], unresolved_text="UNRESOLVED: the evidence does not support a search program yet.", purpose="planner")
+                        self.check_planner_packet(inv.packet, pinv.packet)
+                    else:
+                        pinv = Invocation(f"planner#{version}", "planner", version, self.planner_messages(opening, inv.packet, st["replies"]),
+                                          self.roles["planner"].tools, pkt, 0, "planner_deterministic")
+                        for c in pkt.candidates:   # response states for the carrier: teacher-forced program text
+                            c.rep_text = c.text if not c.is_unresolved else ""
+                        self.invocations.append(pinv)
+                        self.trace.add("invocation", inv_id=pinv.inv_id, role="planner", version=version, purpose="planner_deterministic",
+                                       packet=pkt.public(), n_samples=0, invalid=0, invalid_examples=[], finish_reasons=[])
+                self.trace.add("planner_checked", inv_id=pinv.inv_id, packet=pinv.packet.public())
                 menu = self.planner_menu(inv.packet, st["asked"]) if env.turns_left > 2 else []
             ctx = ReceiverContext("planner", [inv.packet], pinv.packet.candidates, menu,
                                   self.items_budget - self.items_used, env.turns_left, opening)
@@ -643,10 +811,14 @@ class HoosierWorkflow(Workflow):
             if d.kind == "ask" and d.question is not None:
                 self.items_used += d.question.items
                 st["asked"].add(d.question.qid)
-                ans = self.intake_answer(env, d.question)
-                if not ans["resolved"] and env.turns_left > 2:
+                if self.user_direct and d.question.tier in (0, 1) and env.turns_left > 2:
+                    ans = {"question": d.question.text, "qid": d.question.qid, "answer": "", "resolved": True, "sources": []}
                     ans["user_reply"] = self.intake_ask_user_for(env, d.question)
-                    ans["resolved"] = True
+                else:
+                    ans = self.intake_answer(env, d.question)
+                    if not ans["resolved"] and env.turns_left > 2:
+                        ans["user_reply"] = self.intake_ask_user_for(env, d.question)
+                        ans["resolved"] = True
                 st["replies"].append(ans)
                 self.trace.add("clarification", **ans)
                 continue  # intake re-proposes with the reply / new evidence
@@ -671,8 +843,11 @@ class HoosierWorkflow(Workflow):
             results = env.search(programs)
             if env.done:
                 break
+            diagnosis = self.diagnose_relaxation(env, programs) if (self.use_relaxation and all(not r.get("resources") for r in results)) else None
+            if diagnosis:
+                self.trace.add("relaxation_diagnosis", **diagnosis)
             # --- receiver: retriever ---
-            rinv = self.invoke("retriever", self.retriever_messages(opening, pinv.packet, chosen, results), tools=self.roles["retriever"].tools,
+            rinv = self.invoke("retriever", self.retriever_messages(opening, pinv.packet, chosen, results, diagnosis), tools=self.roles["retriever"].tools,
                                ancestors=[pinv.inv_id], purpose="retriever")
             rctx = ReceiverContext("retriever", [pinv.packet], rinv.packet.candidates, [], 0, env.turns_left, opening)
             rd = self.controller.decide(rctx) if self.carrier is None else self.decide(rctx, rinv, None)
@@ -682,6 +857,11 @@ class HoosierWorkflow(Workflow):
             if rchosen.artifact.get("empty") or all(not r.get("resources") for r in results):
                 if env.turns_left > 2:
                     req = rchosen.artifact.get("fallback_request", "location, schedule or intake")
+                    if diagnosis and diagnosis["minimal"]:
+                        # ask about every constraint in the smallest relaxation set not yet asked; else the retriever's choice
+                        best = next((m for m in diagnosis["minimal"] if not all(f in st["fallback_fields_asked"] for f in m.split("+"))), None)
+                        if best:
+                            req = " and ".join({"location": "location", "schedule": "schedule", "intake": "intake method"}[f] for f in best.split("+"))
                     for f in ("location", "schedule", "intake"):
                         if f in req:
                             st["fallback_fields_asked"].append(f)
@@ -725,6 +905,11 @@ class NGQAWorkflow(Workflow):
         """Lexicon grounding: a 'yes' status must be supported by the person's own words, else it becomes 'unknown'."""
         text = " ".join(m["content"] for m in env.messages if m["role"] == "user").lower()
         spec = self.roles["profile"]
+        full_record = getattr(env, "disclosure", "") == "full"
+        if full_record:
+            # ground against the conditions/diets field of the record only (habit texts can mention diet names)
+            m = re.search(r"conditions and special diets:\s*(.*?);\s*dietary habits", text, flags=re.S)
+            text = m.group(1) if m else text
         merged: dict[str, Candidate] = {}
         for c in packet.candidates:
             if c.is_unresolved:
@@ -733,7 +918,13 @@ class NGQAWorkflow(Workflow):
             art = copy.deepcopy(c.artifact)
             changed = False
             for status, val in art["statuses"].items():
-                if val == R.YES and not any(k in text for k in R.STATUS_LEXICON.get(status, [])):
+                if full_record:
+                    # knowledge-QA mode: the record names statuses verbatim, so grounding is exact string presence
+                    truth = R.YES if status.lower() in text else R.NO
+                    if val != truth:
+                        art["statuses"][status] = truth
+                        changed = True
+                elif val == R.YES and not any(k in text for k in R.STATUS_LEXICON.get(status, [])):
                     art["statuses"][status] = R.UNKNOWN
                     changed = True
             if changed:

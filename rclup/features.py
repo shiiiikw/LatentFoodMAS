@@ -148,6 +148,10 @@ class CarrierRuntime:
     @torch.no_grad()
     def pool_packet(self, packet) -> None:
         self.carrier.eval()
+        if not hasattr(self.carrier, "pool_candidate"):  # ScalarControl: no latent slots
+            for c in packet.candidates:
+                c.latent = None
+            return
         if self.generic_latent:
             states = [c.states for c in packet.candidates if c.states is not None]
             joint = torch.cat(states, 0) if states else None
@@ -179,6 +183,8 @@ class CarrierRuntime:
 
     def featurize(self, ctx) -> Featurized:
         data = encode_context(ctx, self.text)
+        if not hasattr(self.carrier, "pool_candidate"):
+            return build_features(data, None, torch.zeros(M_SLOTS, 256))
         return build_features(data, self.pooled_rows(data), self.carrier.pooler.null.detach().cpu())
 
     @torch.no_grad()

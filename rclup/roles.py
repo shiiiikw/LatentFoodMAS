@@ -72,6 +72,13 @@ def repair_json(text: str) -> str:
     return "".join(out)
 
 
+def _fix_common_slips(text: str) -> str:
+    # trailing commas before a closing bracket; a top-level key emitted inside the needs list
+    text = re.sub(r",\s*([\]}])", r"\1", text)
+    text = re.sub(r"\}\s*,\s*\"sources\"\s*:\s*(\[[^\]]*\])\s*\}?\s*\]", lambda m: "}], \"sources\": " + m.group(1), text)
+    return text
+
+
 def parse_json_object(text: str):
     text = re.sub(r"<think>.*?</think>", "", text or "", flags=re.DOTALL).strip()
     text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.MULTILINE).strip()
@@ -79,7 +86,8 @@ def parse_json_object(text: str):
     if start < 0:
         return None
     body = text[start:]
-    for candidate in (body, repair_json(body)):
+    fixed = _fix_common_slips(body)
+    for candidate in (body, fixed, repair_json(body), repair_json(fixed)):
         try:
             obj, _ = json.JSONDecoder().raw_decode(candidate)
             if isinstance(obj, dict):
@@ -246,6 +254,27 @@ def canon_intake(obj: dict) -> tuple[str, dict]:
     return canonical(needs), normalized
 
 
+def time_ranges(text: str) -> list[tuple[str, str]]:
+    """Explicit time windows in the person's words ('between 8:30 AM and 9:30 AM', 'from 2 to 4 pm') as (start, end) HH:MM."""
+    out = []
+    pat = re.compile(r"(?:between|from)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)?\s*(?:and|to|-|–)\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)?", re.I)
+    for m in pat.finditer(text or ""):
+        h1, m1, ap1, h2, m2, ap2 = m.groups()
+        ap1 = (ap1 or ap2 or "").replace(".", "").lower()
+        ap2 = (ap2 or ap1 or "").replace(".", "").lower()
+        def conv(h, mm, ap):
+            h = int(h)
+            if ap == "pm" and h < 12:
+                h += 12
+            if ap == "am" and h == 12:
+                h = 0
+            return f"{h:02d}:{mm or '00'}"
+        a, b = conv(h1, m1, ap1), conv(h2, m2, ap2)
+        if a < b:
+            out.append((a, b))
+    return out
+
+
 def time_supported(hhmm: str, text: str) -> bool:
     """A schedule time literal must be traceable to the person's words (12h or 24h form)."""
     m = re.fullmatch(r"(\d{1,2}):(\d{2})", hhmm or "")
@@ -322,6 +351,13 @@ def canon_planner(obj: dict) -> tuple[str, dict]:
         norm = sc.normalize_tool_args(p["arguments"])
         if not norm["service_categories"]:
             continue
+        # none-like tokens are "no constraint" (empty), never literal values
+        for f in ("intake_methods", "available_documents", "eligibility", "counties", "cities", "zipcodes"):
+            norm[f] = [v for v in norm[f] if v.lower() not in NONE_TOKENS and v.lower() not in UNKNOWN_TOKENS]
+        sch = norm.get("schedule") or {}
+        if sch.get("day") and sch["day"] not in {"mon", "tue", "wed", "thu", "fri", "sat", "sun"}:
+            sch = {}
+        norm["schedule"] = {k: v for k, v in sch.items() if not (isinstance(v, str) and v.lower() in NONE_TOKENS | UNKNOWN_TOKENS)}
         programs.append({"need_id": f"need-{len(programs) + 1}", "arguments": norm})
     if not programs:
         raise ValueError("no valid program")
@@ -380,7 +416,7 @@ def render_retriever(a: dict) -> str:
 
 HOOSIER_INTAKE_TASK = """You are the INTAKE agent in a three-agent Indiana 211 resource-navigation team (intake -> planner -> retriever).
 Your task: read the conversation with the person seeking help and report the current structured evidence state by calling the report_evidence_state tool exactly once.
-Needs: if the person names two different service needs, create two entries (need-1 and need-2), each with exactly ONE service category. Otherwise one entry.
+Needs: if the person names two different service needs, create two entries (need-1 and need-2), each with exactly ONE service category. Otherwise one entry. Requests that the agent itself pay, buy, order, arrange or provide something are not separate needs: map them to the underlying service category (paying a bill -> Utility Assistance or Financial Assistance and Benefits as stated, buying groceries -> Food Assistance, a ride -> Transportation).
 For each need record the service category and five search fields. Each field must be exactly one of:
   - "unknown": the person has not been asked about it or did not answer (silence is NOT "none");
   - "none": the person explicitly said they have no constraint / no preference / nothing for this field, or (after an empty search) that they are flexible on it;
@@ -517,7 +553,7 @@ def render_reasoner(a: dict) -> str:
 
 
 NGQA_PROFILE_TASK = """You are the PROFILE agent in a two-agent nutrition-assistant team (profile -> reasoner).
-Your task: read the conversation with the person and report their current health profile state by calling the report_profile tool exactly once. For each of the 13 statuses, use "yes" if the person said they have it, "no" if they explicitly said they do not, and "unknown" if it has not been established. Map everyday language to the status names (e.g. "high blood pressure" -> hypertension, "my doctor says I'm obese" -> obesity). Never infer a status from habits or from another status: adding salt at the table is not a low-sodium diet, a low-fat diet is not a weight-loss diet, being overweight is not diabetes. Also list dietary habits they mentioned. Record the 1-based indices of the person's messages that support your entries in "sources"."""
+Your task: read the conversation with the person (or the person's record, when it is given directly) and report their current health profile state by calling the report_profile tool exactly once. For each of the 13 statuses, use "yes" if the person said they have it, "no" if they explicitly said they do not, and "unknown" if it has not been established. Map everyday language to the status names (e.g. "high blood pressure" -> hypertension, "my doctor says I'm obese" -> obesity). Never infer a status from habits or from another status: adding salt at the table is not a low-sodium diet, a low-fat diet is not a weight-loss diet, being overweight is not diabetes. Also list dietary habits they mentioned. Record the 1-based indices of the person's messages that support your entries in "sources"."""
 
 NGQA_REASONER_TASK = """You are the REASONER agent in a two-agent nutrition-assistant team (profile -> reasoner).
 You do NOT see the user conversation. You receive the profile agent's handoff (alternative interpretations of the person's health profile with empirical support), the public food record, the nutrition guideline, and a deterministic guideline analysis for each interpretation (which food tags its confirmed statuses contradict or match, and the rule verdict). Your task: decide whether the food is healthy for this person by calling report_verdict exactly once.

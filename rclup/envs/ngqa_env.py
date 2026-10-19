@@ -65,7 +65,7 @@ def rouge_l_f1(pred: str, ref: str) -> float:
 class NGQAEnv:
     def __init__(self, root: dict, ledger: CostLedger, max_user_questions: int = MAX_USER_QUESTIONS, disclosure: str = "half"):
         self.root = root
-        self.max_user_questions = max_user_questions
+        self.max_user_questions = 0 if disclosure == "full" else max_user_questions
         self.disclosure = disclosure
         self.user = NGQAUser(root, ledger, disclosure=disclosure)
         self.messages: list[dict] = []
