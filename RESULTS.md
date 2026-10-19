@@ -41,10 +41,10 @@
 
 | system | seed 0 | seed 1 | seed 2 | mean ± std |
 |---|---|---|---|---|
-| v5 text controller (no asks) | 0.571 | 0.583 | (pending) | 0.577 ± 0.009 (n=2) |
-| v5 without fallback clarification | 0.383 | 0.387 | (pending) | 0.385 ± 0.002 (n=2) |
-| v5 + decision-relevance VOI | 0.583 | 0.579 | (pending) | 0.581 ± 0.003 (n=2) |
-| v5 + learned rich-text controller | 0.583 | 0.588 | (pending) | 0.585 ± 0.003 (n=2) |
+| v5 text controller (no asks) | 0.571 | 0.583 | 0.567 | 0.574 ± 0.009 (n=3) |
+| v5 without fallback clarification | 0.383 | 0.383 | 0.396 | 0.388 ± 0.007 (n=3) |
+| v5 + decision-relevance VOI | 0.583 | 0.579 | 0.562 | 0.575 ± 0.011 (n=3) |
+| v5 + learned rich-text controller | 0.583 | 0.588 | 0.567 | 0.579 ± 0.011 (n=3) |
 
 ## HoosierHelp v5 — by behavior and by case (text controller)
 
@@ -69,6 +69,25 @@
 
 Original NGQA paper, best reported configuration (GPT-4o-mini + ToG): standard 0.86, complex 0.53.
 
+## Cost accounting (HoosierHelp)
+
+| item | wall time | generation calls / completion tokens | simulated-user spend |
+|---|---|---|---|
+| v5 label collection (200 roots, 1 seed, ~2 prefixes/root) | 8.8 min | 3600 / 1.32M | $0.22 |
+| v5 calibration labels (30 roots) | 1.5 min | 468 / 0.18M | $0.03 |
+| v6 label collection (200 roots) | (pending) | | |
+| v6 calibration labels (30 roots) | (pending) | | |
+| v5 controller training (A + C phases) | 40 s (GPU, tiny model) | — | — |
+
+| controller (v5 / v6 eval, 240 episodes) | wall per episode | completion tokens per episode | user spend per episode | questions to person |
+|---|---|---|---|---|
+| v5 text (no asks) | 1.8 s | 6232 | $0.0001 | 3.93 |
+| v5 VOI (online search signatures) | 1.9 s | 6457 | $0.0002 | 4.04 |
+| v5 learned rich-text | 2.3 s | 6349 | $0.0001 | 3.99 |
+| v6 fixed order | 2.9 s | 6710 | $0.0010 | 4.19 |
+| v6 VOI (priors) | (pending) | | | |
+| v6 learned rich-text | (pending) | | | |
+
 ## Spend
 
-Simulated-user API spend to date: $91.18 over 45706 calls (gpt-4.1 until 2026-10-19 05:30, gpt-4.1-mini after; replies cached by transcript prefix).
+Simulated-user API spend to date: $91.92 over 46902 calls (gpt-4.1 until 2026-10-19 05:30, gpt-4.1-mini after; replies cached by transcript prefix).
