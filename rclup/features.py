@@ -243,7 +243,10 @@ class RCLUPController:
         from .workflow import Decision
         feat = ctx.features
         sc = self.rt.score(feat, self.head)
-        commit_logits = sc["commit_logits"]
+        commit_logits = sc["commit_logits"].clone()
+        unres = [i for i, c in enumerate(ctx.candidates) if getattr(c, "is_unresolved", False)]
+        if unres and len(unres) < len(ctx.candidates):
+            commit_logits[unres] = float("inf")   # never 'commit' the unresolved option when a real program exists
         b_star = int(torch.argmin(commit_logits))
         r_commit = self._risk(commit_logits, [f"{ctx.role}|commit"] * len(commit_logits))
         scores = {"commit_logits": commit_logits.tolist(), "commit_risk": r_commit.tolist(), "b_star": b_star}

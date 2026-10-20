@@ -35,6 +35,8 @@ def load_prefixes(paths: list[str]) -> list[dict]:
         rec = torch.load(p, map_location="cpu", weights_only=False)
         # labels -> mean error per action
         commit = {int(b): statistics.mean(x["error"] for x in v) for b, v in rec["labels"]["commit"].items() if v}
+        rc = rec.get("receiver_candidates") or []
+        commit = {b: e for b, e in commit.items() if not (b < len(rc) and rc[b].get("is_unresolved"))}   # unresolved = hidden 'ask all'; not a commit
         ask = {q: statistics.mean(x["error"] for x in v) for q, v in rec["labels"]["ask"].items() if v}
         if not commit:
             continue

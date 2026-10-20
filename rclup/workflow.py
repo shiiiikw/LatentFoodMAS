@@ -743,8 +743,11 @@ class HoosierWorkflow(Workflow):
         cands.sort(key=lambda c: (not c.greedy, -c.count))
         if not any(c.greedy for c in cands) and cands:
             cands[0].greedy = True
-        cands.append(Candidate(key=UNRESOLVED_KEY, artifact={"unresolved": True},
-                               text="UNRESOLVED: the evidence does not support a search program yet.", is_unresolved=True))
+        if not (self.budget_questions and cands):
+            # v6: unknown fields are already mapped to 'no constraint', so every interpretation has a program; an UNRESOLVED
+            # option would re-enter the fixed intake rule and act as a hidden 'ask everything' action
+            cands.append(Candidate(key=UNRESOLVED_KEY, artifact={"unresolved": True},
+                                   text="UNRESOLVED: the evidence does not support a search program yet.", is_unresolved=True))
         total = sum(c.weight for c in cands if not c.is_unresolved)
         return Packet(origin=f"planner#{version}", version=version, sender_role="planner", candidates=cands,
                       residual_weight=max(0.0, 1.0 - total), residual_count=intake_packet.residual_count,
