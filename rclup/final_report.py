@@ -170,20 +170,21 @@ def main():
     beta7 = (an / "chosen_beta.txt").read_text().strip() if (an / "chosen_beta.txt").exists() else "?"
     ROWS7 = (("ask on every open question (disagreement-first order)", "hoosier_disagreement_ask_b5"),
              ("fixed field order, ask everything", "hoosier_fixed_order_b5"),
-             ("budget-aware value of information (train priors, no learning)", "hoosier_voi_det_b5"),
-             (f"**ours: learned + VOI hybrid (β={beta7}, λ={lam7})**", "voi"),
-             (f"ours: learned, free question choice (λ={lam7})", "lam"),
-             (f"ours: learned stop rule, fixed question order (λ={lam7})", "ord"))
+             ("myopic value of information (literature rule: no budget model)", "hoosier_voi_myopic_b5"),
+             (f"**ours: learned + budget-aware VOI (β={beta7}, λ={lam7})**", "voi"),
+             ("  ours without learning: budget-aware VOI only", "hoosier_voi_det_b5"),
+             (f"  ours without VOI: learned only, free question choice (λ={lam7})", "lam"),
+             (f"  ours, learned stop rule with fixed question order (λ={lam7})", "ord"))
     out.append("\n## HoosierHelp v7 — ATOMIC questions (one field per question). Table A: free budget (10-turn cap): success / questions per episode\n")
     out.append("| controller | success / questions |\n|---|---|")
     for label, name in ROWS7:
         path = f"eval/v7/{name}/turns10/hoosier_richtext_mc_b5" if name in ("voi", "lam", "ord") else f"eval/v7/turns10/{name}"
         out.append(f"| {label} | {cell(path, True)} |")
-    out.append("\n## HoosierHelp v7 — ATOMIC questions. Table B: fixed budgets: success / questions per episode\n")
-    out.append("| controller | 8 turns (native) | 6 turns |\n|---|---|---|")
+    out.append("\n## HoosierHelp v7 — ATOMIC questions. Table B: turn-cap sweep: success / questions per episode\n")
+    out.append("| controller | 5 turns | 6 turns | 7 turns | 8 turns (native) | 10 turns |\n|---|---|---|---|---|---|")
     for label, name in ROWS7:
         cells = []
-        for T in (8, 6):
+        for T in (5, 6, 7, 8, 10):
             path = f"eval/v7/{name}/turns{T}/hoosier_richtext_mc_b5" if name in ("voi", "lam", "ord") else f"eval/v7/turns{T}/{name}"
             cells.append(cell(path, True))
         out.append(f"| {label} | " + " | ".join(cells) + " |")
