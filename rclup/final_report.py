@@ -134,22 +134,27 @@ def main():
         return f"{acc:.3f} / {uq:.2f}"
     lam_file = RUNS / "eval/analysis_lam/chosen_lam.txt"
     lam_txt = lam_file.read_text().strip() if lam_file.exists() else "?"
+    lam_ord = (RUNS / "eval/analysis_lam_ord/chosen_lam.txt").read_text().strip() if (RUNS / "eval/analysis_lam_ord/chosen_lam.txt").exists() else "?"
+    beta_txt = (RUNS / "eval/analysis_beta/chosen_beta.txt").read_text().strip() if (RUNS / "eval/analysis_beta/chosen_beta.txt").exists() else "?"
     ROWS = (("ask on every open question (disagreement-first order)", "hoosier_disagreement_ask_b5"),
             ("fixed field order, ask everything", "hoosier_fixed_order_b5"),
             ("budget-aware value of information (train priors, no learning)", "hoosier_voi_det_b5"),
-            (f"**ours: learned rich-text controller (λ={lam_txt} chosen on validation)**", "LEARNED"))
+            (f"ours: learned rich-text controller, free question choice (λ={lam_txt})", "LEARNED"),
+            (f"ours: learned stop rule, fixed question order (λ={lam_ord})", "LEARNED_ORD"),
+            (f"**ours: learned + VOI hybrid (β={beta_txt}, λ={lam_txt})**", "LEARNED_VOI"))
+    LDIR = {"LEARNED": "lam", "LEARNED_ORD": "ord", "LEARNED_VOI": "voi"}
     out.append("\n## HoosierHelp v6 — Table A: free interaction budget (10-turn cap). success / questions to the person per episode\n")
     out.append("| controller | success / questions |\n|---|---|")
     for label, name in ROWS:
-        path = f"eval/v6/lam/turns10/hoosier_richtext_mc_b5" if name == "LEARNED" else f"eval/v6/turns10/{name}"
+        path = f"eval/v6/{LDIR[name]}/turns10/hoosier_richtext_mc_b5" if name in LDIR else f"eval/v6/turns10/{name}"
         out.append(f"| {label} | {cell(path, True)} |")
     out.append("\n## HoosierHelp v6 — Table B: fixed interaction budgets. success (questions per episode)\n")
     out.append("| controller | 8 turns (native) | 7 turns | 6 turns |\n|---|---|---|---|")
     for label, name in ROWS:
         cells = []
         for T in (8, 7, 6):
-            if name == "LEARNED":
-                path = f"eval/v6/lam/turns{T}/hoosier_richtext_mc_b5"
+            if name in LDIR:
+                path = f"eval/v6/{LDIR[name]}/turns{T}/hoosier_richtext_mc_b5"
             else:
                 path = f"eval/v6/{name}" if T == 8 else f"eval/v6/turns{T}/{name}"
             cells.append(cell(path, True))
