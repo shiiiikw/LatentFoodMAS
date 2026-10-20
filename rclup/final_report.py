@@ -38,6 +38,11 @@ def rate(run: dict, keys) -> str:
     return f"{statistics.mean(em(run[k]) for k in ks):.3f} (n={len(ks)})" if ks else "—"
 
 
+def asks(run: dict, keys=None) -> str:
+    ks = [k for k in (keys if keys is not None else run) if k in run]
+    return f"{statistics.mean((run[k].get('score') or {}).get('user_questions', 0) for k in ks):.2f}" if ks else "—"
+
+
 def paired(run: dict, ref: dict, keys) -> str:
     ks = [k for k in keys if k in run and k in ref]
     if not ks:
@@ -58,7 +63,7 @@ def main():
     k4 = [k for k in allk if not k.endswith("self_contradictory")]
     ksc = [k for k in allk if k.endswith("self_contradictory")]
     out.append("# Results (auto-generated)\n\n## HoosierHelp — workflow module ablation (text controller, no agent-to-agent asks)\n")
-    out.append("| workflow | 4 behaviors (192) | all 5 (240) | self-contradictory (48) |\n|---|---|---|---|")
+    out.append("| workflow | 4 behaviors (192) | all 5 (240) | self-contradictory (48) | questions to person / episode |\n|---|---|---|---|---|")
     for label, path in (("official single-agent loop (same Qwen3-8B)", "baselines/native_single_agent_b5"),
                         ("v1 plain role chain (start)", "eval/full/hoosier_text_mas_b5"),
                         ("v2 + counterfactual relaxation diagnosis", "eval/full2/hoosier_text_mas_b5"),
@@ -74,12 +79,13 @@ def main():
             def r_(bs):
                 xs = [em(r) for r in recs if r["user_behavior"] in bs]
                 return f"{statistics.mean(xs):.3f} (n={len(xs)})" if xs else "—"
-            out.append(f"| {label} | {r_(B4)} | {r_(BEH)} | {r_(('self_contradictory',))} |")
+            uq = statistics.mean(len(r.get("user_reply_indices", r.get("messages", [])) or []) if "score" not in r else (r["score"].get("user_questions", 0)) for r in recs)
+            out.append(f"| {label} | {r_(B4)} | {r_(BEH)} | {r_(('self_contradictory',))} | {uq:.2f} |")
             continue
         if run is None:
-            out.append(f"| {label} | (pending) | | |")
+            out.append(f"| {label} | (pending) | | | |")
             continue
-        out.append(f"| {label} | {rate(run, k4)} | {rate(run, allk)} | {rate(run, ksc)} |")
+        out.append(f"| {label} | {rate(run, k4)} | {rate(run, allk)} | {rate(run, ksc)} | {asks(run)} |")
     out.append("\n## HoosierHelp — related-work style baselines (same Qwen3-8B, same simulated user, same turn cap; errors count as failures)\n")
     out.append("| system | 4 behaviors (192) | all 5 (240) | self-contradictory (48) | questions to person (avg) |\n|---|---|---|---|---|")
     for label, path in (("single agent, official prompt, direct", "eval/hoosier_baselines/baseline_single_direct"),
@@ -99,7 +105,7 @@ def main():
         uq = statistics.mean((r.get("score") or {}).get("user_questions", 0) for r in run.values())
         out.append(f"| {label} | {rate(run, k4_)} | {rate(run, ks)} | {rate(run, ksc_)} | {uq:.2f} |")
     out.append("\n## HoosierHelp — clarification controllers on the v5 workflow (paired vs. v5 text controller)\n")
-    out.append("| controller | 4 behaviors | Δ vs no-ask [95% CI] | all 5 | Δ all | asks to person |\n|---|---|---|---|---|---|")
+    out.append("| controller | 4 behaviors | Δ vs no-ask [95% CI] | all 5 | Δ all | controller asks (total) | questions to person / episode |\n|---|---|---|---|---|---|---|")
     for label, path in (("no agent-to-agent asks (v5 text)", "eval/final/hoosier_text_mas_b5"),
                         ("ask whenever candidates disagree", "eval/final/hoosier_disagreement_ask_b5"),
                         ("max-uncertainty", "eval/final/hoosier_max_uncertainty_b5"),
@@ -110,10 +116,10 @@ def main():
                         ("  ablation: no receiver state", "eval/final/hoosier_richtext_mc_no_receiver_state_b5")):
         run = load(path)
         if run is None or v5 is None:
-            out.append(f"| {label} | (pending) | | | | |")
+            out.append(f"| {label} | (pending) | | | | | |")
             continue
-        asks = sum(1 for r in run.values() for e in (r.get("trace") or []) if e.get("kind") == "clarification" and "user_reply" in e)
-        out.append(f"| {label} | {rate(run, k4)} | {paired(run, v5, k4)} | {rate(run, allk)} | {paired(run, v5, allk)} | {asks} |")
+        n_asks = sum(1 for r in run.values() for e in (r.get("trace") or []) if e.get("kind") == "clarification" and "user_reply" in e)
+        out.append(f"| {label} | {rate(run, k4)} | {paired(run, v5, k4)} | {rate(run, allk)} | {paired(run, v5, allk)} | {n_asks} | {asks(run)} |")
     # ---------------- v6: budget-aware question menu. Table A: free budget (cap 10) -- success and questions asked.
     # Table B: fixed budgets (caps 8/7/6) -- success. Three baselines + ours (learned, lam chosen on offline validation).
     def cell(path, with_asks=False):
