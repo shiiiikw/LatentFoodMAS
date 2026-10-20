@@ -50,8 +50,9 @@ class Collector:
 
     def _branch(self, env_prefix, wf_prefix, snapshot: dict, forced: Decision, seed: int) -> dict:
         env = env_prefix.fork()
-        from .workflow import FixedOrderController
-        inner = FixedOrderController() if getattr(self, "variant", "") == "v6" else None
+        from .workflow import FixedOrderController, VOIController
+        cont = getattr(self, "continuation", "fixed")
+        inner = (VOIController() if cont == "voi" else FixedOrderController()) if getattr(self, "variant", "") == "v6" else None
         wf = wf_prefix.fork(ForcedController(forced, seed, inner), seed=seed)
         resume = {"st": copy.deepcopy(snapshot["st"]), "menu": snapshot["menu"], "forced": forced, "inv": snapshot["inv"]}
         if self.dataset == "hoosier":
@@ -248,6 +249,9 @@ def main():
     p.add_argument("--variant", default="v5", choices=["v1", "v2", "v3", "v4", "v5", "v5nofb", "v6"], help="HoosierHelp workflow preset used while collecting")
     p.add_argument("--max-turns", type=int, default=None, help="HoosierHelp agent-turn cap while collecting (budget-pressure labels)")
     p.add_argument("--intake-policy", default="three", choices=["three", "atomic"], help="intake question grouping while collecting")
+    p.add_argument("--continuation", default="fixed", choices=["fixed", "voi"],
+                   help="v6 branch continuation after the forced decision: fixed order (ask everything) or the budget-aware VOI policy "
+                        "(labels then measure a one-step improvement over our own no-learning policy)")
     p.add_argument("--out", required=True)
     p.add_argument("--ledger", default=str(RUNS / "ledger_validation.json"))
     p.add_argument("--cap-usd", type=float, default=40.0)
@@ -267,6 +271,7 @@ def main():
     col.variant = a.variant
     col.max_turns = a.max_turns
     col.intake_policy = a.intake_policy
+    col.continuation = a.continuation
     start = time.monotonic()
     usd0 = ledger.usd
     with ThreadPoolExecutor(max_workers=a.workers) as ex:
