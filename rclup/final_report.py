@@ -87,23 +87,34 @@ def main():
             continue
         out.append(f"| {label} | {rate(run, k4)} | {rate(run, allk)} | {rate(run, ksc)} | {asks(run)} |")
     out.append("\n## HoosierHelp — related-work style baselines (same Qwen3-8B, same simulated user, same turn cap; errors count as failures)\n")
-    out.append("| system | 4 behaviors (192) | all 5 (240) | self-contradictory (48) | questions to person (avg) |\n|---|---|---|---|---|")
-    for label, path in (("single agent, official prompt, direct", "eval/hoosier_baselines/baseline_single_direct"),
-                        ("single agent, official prompt, step-by-step (thinking)", "eval/hoosier_baselines/baseline_single_cot"),
-                        ("plain role chain (one greedy handoff)", "eval/hoosier_baselines/baseline_plain_mas"),
-                        ("9-way majority-vote handoff", "eval/hoosier_baselines/baseline_vote_mas"),
-                        ("confidence handoff (uncertainty propagation)", "eval/hoosier_baselines/baseline_conf_mas"),
-                        ("**ours: v5 text controller**", "eval/final/hoosier_text_mas_b5"),
-                        ("**ours: v5 + learned rich-text controller**", "eval/final/hoosier_richtext_mc_b5")):
+    out.append("| system | 4 behaviors (192) | all 5 (240) | self-contradictory (48) | questions to person (avg) | all 5, seeds 0/1/2 (mean ± std) |\n|---|---|---|---|---|---|")
+    def seed_cell(seed_paths):
+        vals = []
+        for pth in seed_paths:
+            run = load(pth)
+            if run:
+                vals.append(statistics.mean(em(r) for r in run.values()))
+        if not vals:
+            return "(pending)"
+        return f"{statistics.mean(vals):.3f}" + (f" ± {statistics.stdev(vals):.3f}" if len(vals) > 1 else "") + f" (n={len(vals)})"
+    for label, path, seeds in (("single agent, official prompt, direct (greedy: seed-invariant)", "eval/hoosier_baselines/baseline_single_direct", None),
+                        ("single agent, official prompt, step-by-step (greedy: seed-invariant)", "eval/hoosier_baselines/baseline_single_cot", None),
+                        ("plain role chain, one greedy handoff (seed-invariant)", "eval/hoosier_baselines/baseline_plain_mas", None),
+                        ("9-way majority-vote handoff", "eval/hoosier_baselines/baseline_vote_mas", ["eval/hoosier_baselines/baseline_vote_mas", "eval/hoosier_baselines/seed1/baseline_vote_mas", "eval/hoosier_baselines/seed2/baseline_vote_mas"]),
+                        ("confidence handoff (uncertainty propagation)", "eval/hoosier_baselines/baseline_conf_mas", ["eval/hoosier_baselines/baseline_conf_mas", "eval/hoosier_baselines/seed1/baseline_conf_mas", "eval/hoosier_baselines/seed2/baseline_conf_mas"]),
+                        ("**ours: candidate handoff + grounding/fallback repair + decision-relevant VOI with interaction cost**", "eval/final_fixed/hoosier_voi_det_b5", ["eval/final_fixed/hoosier_voi_det_b5", "eval/final_fixed/seed1/hoosier_voi_det_b5", "eval/final_fixed/seed2/hoosier_voi_det_b5"]),
+                        ("  ablation: same workflow, protocol questions only (no clarification decision)", "eval/final_fixed/hoosier_text_mas_b5", ["eval/final_fixed/hoosier_text_mas_b5", "eval/final_fixed/seed1/hoosier_text_mas_b5", "eval/final_fixed/seed2/hoosier_text_mas_b5"]),
+                        ("  ablation: no fallback clarification", "eval/final_fixed/hoosier_text_mas_nofb_b5", None)):
         run = load(path)
         if run is None:
-            out.append(f"| {label} | (pending) | | | |")
+            out.append(f"| {label} | (pending) | | | | |")
             continue
         ks = sorted(run)
         k4_ = [k for k in ks if not k.endswith("self_contradictory")]
         ksc_ = [k for k in ks if k.endswith("self_contradictory")]
         uq = statistics.mean((r.get("score") or {}).get("user_questions", 0) for r in run.values())
-        out.append(f"| {label} | {rate(run, k4_)} | {rate(run, ks)} | {rate(run, ksc_)} | {uq:.2f} |")
+        sc = seed_cell(seeds) if seeds else "greedy (std 0)"
+        out.append(f"| {label} | {rate(run, k4_)} | {rate(run, ks)} | {rate(run, ksc_)} | {uq:.2f} | {sc} |")
     out.append("\n## HoosierHelp — clarification controllers on the v5 workflow (paired vs. v5 text controller)\n")
     out.append("| controller | 4 behaviors | Δ vs no-ask [95% CI] | all 5 | Δ all | controller asks (total) | questions to person / episode |\n|---|---|---|---|---|---|---|")
     for label, path in (("no agent-to-agent asks (v5 text)", "eval/final/hoosier_text_mas_b5"),
@@ -192,23 +203,42 @@ def main():
     beta7 = (an / "chosen_beta.txt").read_text().strip() if (an / "chosen_beta.txt").exists() else "?"
     ROWS7 = (("ask on every open question (disagreement-first order)", "hoosier_disagreement_ask_b5"),
              ("fixed field order, ask everything", "hoosier_fixed_order_b5"),
-             ("myopic value of information (literature rule: no budget model)", "hoosier_voi_myopic_b5"),
-             (f"**ours: learned + budget-aware VOI (β={beta7}, λ={lam7})**", "voi"),
-             ("  ours without learning: budget-aware VOI only", "hoosier_voi_det_b5"),
-             (f"  ours without VOI: learned only, free question choice (λ={lam7})", "lam"),
-             (f"  ours, learned stop rule with fixed question order (λ={lam7})", "ord"))
+             ("myopic value of information (literature rule: no interaction cost)", "hoosier_voi_myopic_b5"),
+             ("**ours: decision-relevant value of information with interaction cost (no learning)**", "hoosier_voi_det_b5"),
+             ("  ablation: local confidence instead of receiver-task information (max-uncertainty)", "hoosier_max_uncertainty_b5"),
+             (f"  appendix: learned + VOI hybrid (β={beta7}, λ={lam7})", "voi"),
+             (f"  appendix: learned only, free question choice (λ={lam7})", "lam"),
+             (f"  appendix: learned stop rule, fixed question order (λ={lam7})", "ord"))
+    def seeds7(name, T):
+        vals = []
+        for sd in (0, 1, 2):
+            path = f"eval/v7/turns{T}/{name}" if sd == 0 else f"eval/v7/seed{sd}/turns{T}/{name}"
+            run = load(path)
+            if run:
+                vals.append((statistics.mean(em(r) for r in run.values()), statistics.mean((r.get("score") or {}).get("user_questions", 0) for r in run.values())))
+        if not vals:
+            return "(pending)"
+        a = [v[0] for v in vals]; q = [v[1] for v in vals]
+        sd = f" ± {statistics.stdev(a):.3f}" if len(a) > 1 else ""
+        return f"{statistics.mean(a):.3f}{sd} / {statistics.mean(q):.2f} (n={len(a)})"
     out.append("\n## HoosierHelp v7 — ATOMIC questions (one field per question). Table A: free budget (10-turn cap): success / questions per episode\n")
     out.append("| controller | success / questions |\n|---|---|")
     for label, name in ROWS7:
         path = f"eval/v7/{name}/turns10/hoosier_richtext_mc_b5" if name in ("voi", "lam", "ord") else f"eval/v7/turns10/{name}"
         out.append(f"| {label} | {cell(path, True)} |")
-    out.append("\n## HoosierHelp v7 — ATOMIC questions. Table B: turn-cap sweep: success / questions per episode\n")
+    out.append("\nSeeds change only the backbone's sampled proposals (and the vote/confidence baselines' samples); single-agent and plain-chain "
+               "baselines are greedy and therefore seed-invariant. Simulated-user replies are cached by transcript.")
+    out.append("\n## HoosierHelp v7 — ATOMIC questions. Table B: turn-cap sweep: success / questions per episode (6/7/8 turns: mean ± std over seeds)\n")
     out.append("| controller | 5 turns | 6 turns | 7 turns | 8 turns (native) | 10 turns |\n|---|---|---|---|---|---|")
     for label, name in ROWS7:
         cells = []
         for T in (5, 6, 7, 8, 10):
-            path = f"eval/v7/{name}/turns{T}/hoosier_richtext_mc_b5" if name in ("voi", "lam", "ord") else f"eval/v7/turns{T}/{name}"
-            cells.append(cell(path, True))
+            if name in ("voi", "lam", "ord"):
+                cells.append(cell(f"eval/v7/{name}/turns{T}/hoosier_richtext_mc_b5", True))
+            elif T in (6, 7, 8):
+                cells.append(seeds7(name, T))
+            else:
+                cells.append(cell(f"eval/v7/turns{T}/{name}", True))
         out.append(f"| {label} | " + " | ".join(cells) + " |")
     out.append("\nSupplementary v7 rows (8 turns): never ask " + cell("eval/v7/turns8/hoosier_text_mas_b5", True) +
                "; hybrid without dependency features " + cell("eval/v7/turns8/hoosier_richtext_no_dependency_mc_b5", True) +
