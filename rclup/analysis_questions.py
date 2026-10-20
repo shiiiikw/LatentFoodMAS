@@ -78,16 +78,24 @@ def rule_pick(rule: str, rec: dict, aux: dict, scores: dict | None) -> tuple[str
         if max(vals) > 0:
             return ("ask", menu[max(range(len(vals)), key=lambda i: vals[i])]["qid"])
         return ("commit", None)
-    if rule.startswith("learned:"):
+    if rule.startswith("learned:") or rule.startswith("learnedord:"):
         # Eq. (8)/(10) with raw sigmoid risks: ask the max positive gain question, else commit b*
+        # learnedord: group questions restricted to the fixed-order first group (learned stop rule, fixed question order)
         lam = LAM
+        eligible = set(range(len(menu)))
+        if rule.startswith("learnedord:"):
+            order = aux.get("field_order", {})
+            groups = [i for i, q in enumerate(menu) if (q.get("scope") or {}).get("pairs") is not None]
+            if groups:
+                first = min(groups, key=lambda i: order.get(menu[i]["qid"], 10 ** 6))
+                eligible = {i for i in range(len(menu)) if i not in groups or i == first}
         r_commit = torch.sigmoid(scores["commit"])
         b_star = int(torch.argmin(scores["commit"]))
         best_q, best_gain = None, 0.0
         if scores["ask"] is not None:
-            for q, r in zip(menu, torch.sigmoid(scores["ask"]).tolist()):
+            for i, (q, r) in enumerate(zip(menu, torch.sigmoid(scores["ask"]).tolist())):
                 g = float(r_commit[b_star]) - r - lam
-                if g > best_gain:
+                if i in eligible and g > best_gain:
                     best_q, best_gain = q["qid"], g
         return ("ask", best_q) if best_q else ("commit", None)
     raise ValueError(rule)
@@ -152,7 +160,7 @@ def main():
                 out.append({"commit": c.detach(), "ask": None if q is None else q.detach()})
         learned[name] = out
     F.ABLATION.clear()
-    rules = ["never", "disagreement_first", "max_uncertainty", "fixed_order", "voi_det"] + [f"learned:{n}" for n in learned]
+    rules = ["never", "disagreement_first", "max_uncertainty", "fixed_order", "voi_det"] + [f"learned:{n}" for n in learned] + [f"learnedord:{n}" for n in learned]
     # question categories from labels: for each menu question, does asking beat the best commit?
     cat = collections.Counter()
     per_rule = {r: collections.defaultdict(list) for r in rules}
@@ -181,7 +189,7 @@ def main():
             sit_n[qsit[q["qid"]]] += 1
             sit_useful[qsit[q["qid"]]] += bool(useful.get(q["qid"]))
         for r in rules:
-            kind, qid = rule_pick(r, rec, aux_all[i], learned[r.split(":", 1)[1]][i] if r.startswith("learned:") else None)
+            kind, qid = rule_pick(r, rec, aux_all[i], learned[r.split(":", 1)[1]][i] if ":" in r else None)
             if kind == "ask" and qid in qsit:
                 sit_ask[r][qsit[qid]] += 1
                 sit_ask_useful[r][qsit[qid]] += bool(useful.get(qid))

@@ -9,6 +9,8 @@ training; `build_features` turns that data into tensors for the carrier
 """
 from __future__ import annotations
 
+import os
+
 import hashlib
 import math
 from dataclasses import dataclass
@@ -251,13 +253,22 @@ class RCLUPController:
         r_commit = self._risk(commit_logits, [f"{ctx.role}|commit"] * len(commit_logits))
         scores = {"commit_logits": commit_logits.tolist(), "commit_risk": r_commit.tolist(), "b_star": b_star}
         best_q, best_gain = None, 0.0
+        # ordered mode (RCLUP_ORDERED_GROUPS=1): the learned rule decides whether one more intake question is worth a turn;
+        # which group to ask follows the task's fixed order (lowest field rank), other menu items stay eligible
+        eligible = set(range(len(ctx.menu)))
+        if os.environ.get("RCLUP_ORDERED_GROUPS") == "1" and ctx.menu:
+            order = (ctx.aux or {}).get("field_order", {})
+            groups = [i for i, q in enumerate(ctx.menu) if (q.scope or {}).get("pairs") is not None]
+            if groups:
+                first = min(groups, key=lambda i: order.get(ctx.menu[i].qid, 10 ** 6))
+                eligible = {i for i in range(len(ctx.menu)) if i not in groups or i == first}
         if ctx.menu and sc["question_logits"].numel():
             r_ask = self._risk(sc["question_logits"], [f"{ctx.role}|ask"] * len(ctx.menu))
             gains = []
-            for q, r in zip(ctx.menu, r_ask.tolist()):
+            for i, (q, r) in enumerate(zip(ctx.menu, r_ask.tolist())):
                 g = float(r_commit[b_star]) - r - self.lam * q.items
                 gains.append(g)
-                if q.items <= ctx.items_left and ctx.external_left > self.reserve and g > best_gain:
+                if i in eligible and q.items <= ctx.items_left and ctx.external_left > self.reserve and g > best_gain:
                     best_q, best_gain = q, g
             scores.update({"ask_risk": r_ask.tolist(), "gains": gains})
         if best_q is not None:
