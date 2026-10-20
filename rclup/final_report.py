@@ -164,6 +164,32 @@ def main():
                "; learned at default λ=0.02 " + cell("eval/v6/hoosier_richtext_mc_b5", True) +
                "; learned without dependency features " + cell("eval/v6/hoosier_richtext_no_dependency_mc_b5", True) +
                "; learned without receiver state " + cell("eval/v6/hoosier_richtext_no_receiver_state_mc_b5", True) + ".")
+    # ---------------- v7: atomic questions (one field per question). Same two tables; lam/beta chosen on validation.
+    an = RUNS / "eval/analysis_v7"
+    lam7 = (an / "chosen_lam.txt").read_text().strip() if (an / "chosen_lam.txt").exists() else "?"
+    beta7 = (an / "chosen_beta.txt").read_text().strip() if (an / "chosen_beta.txt").exists() else "?"
+    ROWS7 = (("ask on every open question (disagreement-first order)", "hoosier_disagreement_ask_b5"),
+             ("fixed field order, ask everything", "hoosier_fixed_order_b5"),
+             ("budget-aware value of information (train priors, no learning)", "hoosier_voi_det_b5"),
+             (f"**ours: learned + VOI hybrid (β={beta7}, λ={lam7})**", "voi"),
+             (f"ours: learned, free question choice (λ={lam7})", "lam"),
+             (f"ours: learned stop rule, fixed question order (λ={lam7})", "ord"))
+    out.append("\n## HoosierHelp v7 — ATOMIC questions (one field per question). Table A: free budget (10-turn cap): success / questions per episode\n")
+    out.append("| controller | success / questions |\n|---|---|")
+    for label, name in ROWS7:
+        path = f"eval/v7/{name}/turns10/hoosier_richtext_mc_b5" if name in ("voi", "lam", "ord") else f"eval/v7/turns10/{name}"
+        out.append(f"| {label} | {cell(path, True)} |")
+    out.append("\n## HoosierHelp v7 — ATOMIC questions. Table B: fixed budgets: success / questions per episode\n")
+    out.append("| controller | 8 turns (native) | 6 turns |\n|---|---|---|")
+    for label, name in ROWS7:
+        cells = []
+        for T in (8, 6):
+            path = f"eval/v7/{name}/turns{T}/hoosier_richtext_mc_b5" if name in ("voi", "lam", "ord") else f"eval/v7/turns{T}/{name}"
+            cells.append(cell(path, True))
+        out.append(f"| {label} | " + " | ".join(cells) + " |")
+    out.append("\nSupplementary v7 rows (8 turns): never ask " + cell("eval/v7/turns8/hoosier_text_mas_b5", True) +
+               "; hybrid without dependency features " + cell("eval/v7/turns8/hoosier_richtext_no_dependency_mc_b5", True) +
+               "; hybrid without receiver state " + cell("eval/v7/turns8/hoosier_richtext_no_receiver_state_mc_b5", True) + ".")
     # ---------------- multi-seed robustness (same 240 episodes, sampling seeds 0/1/2)
     out.append("\n## HoosierHelp — sampling-seed robustness (all 5 behaviors, 240 episodes per run; mean ± std over seeds)\n")
     out.append("| system | seed 0 | seed 1 | seed 2 | mean ± std |\n|---|---|---|---|---|")
