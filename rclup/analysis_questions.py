@@ -31,6 +31,9 @@ def oracle_stats(rec: dict) -> dict:
             "gains": gains, "oracle": min([best_commit] + list(ya.values()))}
 
 
+LAM = 0.02   # asking cost of the learned rule (set from --lam)
+
+
 def rule_pick(rule: str, rec: dict, aux: dict, scores: dict | None) -> tuple[str, str | None]:
     """Return ('commit', None) or ('ask', qid) for the rule at this prefix (budget: items_left of the context)."""
     data = rec["data"]
@@ -77,7 +80,7 @@ def rule_pick(rule: str, rec: dict, aux: dict, scores: dict | None) -> tuple[str
         return ("commit", None)
     if rule.startswith("learned:"):
         # Eq. (8)/(10) with raw sigmoid risks: ask the max positive gain question, else commit b*
-        lam = 0.02
+        lam = LAM
         r_commit = torch.sigmoid(scores["commit"])
         b_star = int(torch.argmin(scores["commit"]))
         best_q, best_gain = None, 0.0
@@ -98,7 +101,10 @@ def main():
     p.add_argument("--ablate", default="", help="name:flag[,..] ablation flags per carrier name, e.g. nodep:dependency")
     p.add_argument("--val-only", action="store_true", help="restrict to the training-time validation split (seed 13, 20%)")
     p.add_argument("--out", required=True)
+    p.add_argument("--lam", type=float, default=0.02, help="asking cost for the learned rule")
     a = p.parse_args()
+    global LAM
+    LAM = a.lam
     from . import features as F
     from .train import load_prefixes, forward_prefix
     from .carrier import Carrier

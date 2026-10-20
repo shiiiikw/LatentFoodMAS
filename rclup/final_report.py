@@ -114,6 +114,45 @@ def main():
             continue
         asks = sum(1 for r in run.values() for e in (r.get("trace") or []) if e.get("kind") == "clarification" and "user_reply" in e)
         out.append(f"| {label} | {rate(run, k4)} | {paired(run, v5, k4)} | {rate(run, allk)} | {paired(run, v5, allk)} | {asks} |")
+    # ---------------- v6: budget-aware question menu. Table A: free budget (cap 10) -- success and questions asked.
+    # Table B: fixed budgets (caps 8/7/6) -- success. Three baselines + ours (learned, lam chosen on offline validation).
+    def cell(path, with_asks=False):
+        run = load(path)
+        if run is None:
+            return "(pending)"
+        ks = sorted(run)
+        acc = statistics.mean(em(run[k]) for k in ks)
+        if not with_asks:
+            return f"{acc:.3f}"
+        uq = statistics.mean((run[k].get("score") or {}).get("user_questions", 0) for k in ks)
+        return f"{acc:.3f} / {uq:.2f}"
+    lam_file = RUNS / "eval/analysis_lam/chosen_lam.txt"
+    lam_txt = lam_file.read_text().strip() if lam_file.exists() else "?"
+    ROWS = (("ask on every open question (disagreement-first order)", "hoosier_disagreement_ask_b5"),
+            ("fixed field order, ask everything", "hoosier_fixed_order_b5"),
+            ("budget-aware value of information (train priors, no learning)", "hoosier_voi_det_b5"),
+            (f"**ours: learned rich-text controller (λ={lam_txt} chosen on validation)**", "LEARNED"))
+    out.append("\n## HoosierHelp v6 — Table A: free interaction budget (10-turn cap). success / questions to the person per episode\n")
+    out.append("| controller | success / questions |\n|---|---|")
+    for label, name in ROWS:
+        path = f"eval/v6/lam/turns10/hoosier_richtext_mc_b5" if name == "LEARNED" else f"eval/v6/turns10/{name}"
+        out.append(f"| {label} | {cell(path, True)} |")
+    out.append("\n## HoosierHelp v6 — Table B: fixed interaction budgets. success (questions per episode)\n")
+    out.append("| controller | 8 turns (native) | 7 turns | 6 turns |\n|---|---|---|---|")
+    for label, name in ROWS:
+        cells = []
+        for T in (8, 7, 6):
+            if name == "LEARNED":
+                path = f"eval/v6/lam/turns{T}/hoosier_richtext_mc_b5"
+            else:
+                path = f"eval/v6/{name}" if T == 8 else f"eval/v6/turns{T}/{name}"
+            cells.append(cell(path, True))
+        out.append(f"| {label} | " + " | ".join(cells) + " |")
+    out.append("\nSupplementary v6 rows (8 turns): max-uncertainty " + cell("eval/v6/hoosier_max_uncertainty_b5", True) +
+               "; never ask " + cell("eval/v6/hoosier_text_mas_b5", True) +
+               "; learned at default λ=0.02 " + cell("eval/v6/hoosier_richtext_mc_b5", True) +
+               "; learned without dependency features " + cell("eval/v6/hoosier_richtext_no_dependency_mc_b5", True) +
+               "; learned without receiver state " + cell("eval/v6/hoosier_richtext_no_receiver_state_mc_b5", True) + ".")
     # ---------------- multi-seed robustness (same 240 episodes, sampling seeds 0/1/2)
     out.append("\n## HoosierHelp — sampling-seed robustness (all 5 behaviors, 240 episodes per run; mean ± std over seeds)\n")
     out.append("| system | seed 0 | seed 1 | seed 2 | mean ± std |\n|---|---|---|---|---|")
