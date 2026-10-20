@@ -24,7 +24,8 @@ from . import roles as R
 
 S_DRAWS = 8
 PROPOSAL_MAX_TOKENS = 512
-T_FB = 4   # turns a fallback path needs after the last ordinary question: search, relaxation question, re-search, final
+T_FB = 5   # turns the workflow's fallback path can need after the last ordinary question: search, relaxation question,
+           # follow-up for a vague answer, re-search, final (a design constant of the workflow, not tuned on any split)
 Q_MAX = 6
 
 
