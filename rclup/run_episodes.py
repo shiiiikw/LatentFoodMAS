@@ -124,7 +124,7 @@ def main():
     p.add_argument("--variant", default="v4", choices=["v1", "v2", "v3", "v4", "v5", "v5nofb", "v6"], help="HoosierHelp module ablation preset")
     p.add_argument("--ablate", default="", help="comma list of controller-input ablations (must match training): dependency, receiver_state")
     p.add_argument("--max-turns", type=int, default=None, help="HoosierHelp agent-turn cap (native 8); budget sweep")
-    p.add_argument("--intake-policy", default="three", choices=["three", "two", "skip_docs"],
+    p.add_argument("--intake-policy", default="three", choices=["three", "two", "skip_docs", "atomic"],
                    help="ordinary intake questions: three low-burden groups (native), two messages (location; rest), or three groups minus documents/eligibility")
     p.add_argument("--out", required=True)
     p.add_argument("--ledger", default=str(RUNS / "ledger_validation.json"))
@@ -164,6 +164,8 @@ def main():
             wf.set_variant(a.variant)
             if a.intake_policy == "two":
                 wf.intake_groups = (("location",), ("schedule", "intake_methods", "available_documents", "eligibility"))
+            elif a.intake_policy == "atomic":   # one field per question: questions are comparable across controllers
+                wf.intake_groups = tuple((f,) for f in ("location", "schedule", "intake_methods", "available_documents", "eligibility"))
             elif a.intake_policy == "skip_docs":
                 wf.skip_fields = ("available_documents", "eligibility")
         try:

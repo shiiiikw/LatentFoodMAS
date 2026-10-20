@@ -76,6 +76,8 @@ class Collector:
         wf = self.WF(self.bb, policy, seed=seed, encoder=self.encoder, items_budget=self.items_budget)
         if hasattr(wf, "set_variant"):
             wf.set_variant(self.variant)
+            if getattr(self, "intake_policy", "three") == "atomic":
+                wf.intake_groups = tuple((f,) for f in ("location", "schedule", "intake_methods", "available_documents", "eligibility"))
 
         def hook(wf_live, ctx, snapshot):
             if len(prefixes) >= self.prefixes_per_root:
@@ -245,6 +247,7 @@ def main():
     p.add_argument("--min-statuses", type=int, default=0)
     p.add_argument("--variant", default="v5", choices=["v1", "v2", "v3", "v4", "v5", "v5nofb", "v6"], help="HoosierHelp workflow preset used while collecting")
     p.add_argument("--max-turns", type=int, default=None, help="HoosierHelp agent-turn cap while collecting (budget-pressure labels)")
+    p.add_argument("--intake-policy", default="three", choices=["three", "atomic"], help="intake question grouping while collecting")
     p.add_argument("--out", required=True)
     p.add_argument("--ledger", default=str(RUNS / "ledger_validation.json"))
     p.add_argument("--cap-usd", type=float, default=40.0)
@@ -263,6 +266,7 @@ def main():
                     a.prefixes_per_root, a.items_budget, a.disclosure)
     col.variant = a.variant
     col.max_turns = a.max_turns
+    col.intake_policy = a.intake_policy
     start = time.monotonic()
     usd0 = ledger.usd
     with ThreadPoolExecutor(max_workers=a.workers) as ex:
