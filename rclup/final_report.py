@@ -120,6 +120,28 @@ def main():
             continue
         n_asks = sum(1 for r in run.values() for e in (r.get("trace") or []) if e.get("kind") == "clarification" and "user_reply" in e)
         out.append(f"| {label} | {rate(run, k4)} | {paired(run, v5, k4)} | {rate(run, allk)} | {paired(run, v5, allk)} | {n_asks} | {asks(run)} |")
+    # ---------------- disagreement subset (reviewer chain 1): episodes in which the intake candidates disagree at some
+    # decision point (same episodes for every controller: taken from the no-ask run); who asks there, and does it pay?
+    def dis_keys(run):
+        out = set()
+        for k, r in run.items():
+            for e in (r.get("trace") or []):
+                if e.get("kind") == "intake_checked" and sum(1 for c in e["packet"]["candidates"] if not c.get("is_unresolved")) >= 2:
+                    out.add(k); break
+        return out
+    ref = load("eval/final_fixed/hoosier_text_mas_b5")
+    if ref:
+        D = dis_keys(ref); N = set(ref) - D
+        out.append(f"\n## HoosierHelp v5 — episodes with interpretation disagreement (n={len(D)}) vs. without (n={len(N)}); fixed resolver code\n")
+        out.append("| controller | success, disagreement subset | Δ vs no-ask [95% CI] | success, no-disagreement subset | controller questions to person / episode (subset) |\n|---|---|---|---|---|")
+        for label, path in (("no agent-to-agent asks (v5 text)", "eval/final_fixed/hoosier_text_mas_b5"), ("ask whenever candidates disagree", "eval/final_fixed/hoosier_disagreement_ask_b5"),
+                            ("max-uncertainty", "eval/final_fixed/hoosier_max_uncertainty_b5"), ("fixed field order", "eval/final_fixed/hoosier_fixed_order_b5"),
+                            ("decision-relevance VOI", "eval/final_fixed/hoosier_voi_det_b5"), ("**learned rich-text controller**", "eval/final_fixed/hoosier_richtext_mc_b5")):
+            run = load(path)
+            if run is None:
+                out.append(f"| {label} | (pending) | | | |"); continue
+            cq = statistics.mean(sum(1 for e in (run[k].get("trace") or []) if e.get("kind") == "user_question" and e.get("kind_detail") == "clarification") for k in D if k in run)
+            out.append(f"| {label} | {rate(run, D)} | {paired(run, ref, D)} | {rate(run, N)} | {cq:.2f} |")
     # ---------------- v6: budget-aware question menu. Table A: free budget (cap 10) -- success and questions asked.
     # Table B: fixed budgets (caps 8/7/6) -- success. Three baselines + ours (learned, lam chosen on offline validation).
     def cell(path, with_asks=False):
