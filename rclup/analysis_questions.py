@@ -32,6 +32,7 @@ def oracle_stats(rec: dict) -> dict:
 
 
 LAM = 0.02   # asking cost of the learned rule (set from --lam)
+BETA = 0.5   # VOI weight of the hybrid rule (set from --beta)
 
 
 def rule_pick(rule: str, rec: dict, aux: dict, scores: dict | None) -> tuple[str, str | None]:
@@ -62,7 +63,7 @@ def rule_pick(rule: str, rec: dict, aux: dict, scores: dict | None) -> tuple[str
     if rule == "fixed_order":
         order = aux.get("field_order", {})
         return ("ask", min(menu, key=lambda q: order.get(q["qid"], 10 ** 6))["qid"])
-    if rule == "voi_det":
+    if rule == "voi_det" or rule.startswith("learnedvoi:"):
         vals = []
         for q in menu:
             if (q.get("scope") or {}).get("pairs") is not None:   # v6 group question: budget-aware rule (train priors)
@@ -75,10 +76,12 @@ def rule_pick(rule: str, rec: dict, aux: dict, scores: dict | None) -> tuple[str
             if g_val == "unknown":
                 v += pk["residual_weight"]
             vals.append(v)
-        if max(vals) > 0:
-            return ("ask", menu[max(range(len(vals)), key=lambda i: vals[i])]["qid"])
-        return ("commit", None)
-    if rule.startswith("learned:") or rule.startswith("learnedord:"):
+        if rule == "voi_det":
+            if max(vals) > 0:
+                return ("ask", menu[max(range(len(vals)), key=lambda i: vals[i])]["qid"])
+            return ("commit", None)
+        voi_vals = vals   # hybrid: fall through to the learned rule with VOI mixed in
+    if rule.startswith("learned:") or rule.startswith("learnedord:") or rule.startswith("learnedvoi:"):
         # Eq. (8)/(10) with raw sigmoid risks: ask the max positive gain question, else commit b*
         # learnedord: group questions restricted to the fixed-order first group (learned stop rule, fixed question order)
         lam = LAM
@@ -95,6 +98,8 @@ def rule_pick(rule: str, rec: dict, aux: dict, scores: dict | None) -> tuple[str
         if scores["ask"] is not None:
             for i, (q, r) in enumerate(zip(menu, torch.sigmoid(scores["ask"]).tolist())):
                 g = float(r_commit[b_star]) - r - lam
+                if rule.startswith("learnedvoi:"):
+                    g = (1.0 - BETA) * g + BETA * voi_vals[i]
                 if i in eligible and g > best_gain:
                     best_q, best_gain = q["qid"], g
         return ("ask", best_q) if best_q else ("commit", None)
@@ -110,9 +115,11 @@ def main():
     p.add_argument("--val-only", action="store_true", help="restrict to the training-time validation split (seed 13, 20%)")
     p.add_argument("--out", required=True)
     p.add_argument("--lam", type=float, default=0.02, help="asking cost for the learned rule")
+    p.add_argument("--beta", type=float, default=0.5, help="VOI weight of the hybrid learned rule")
     a = p.parse_args()
-    global LAM
+    global LAM, BETA
     LAM = a.lam
+    BETA = a.beta
     from . import features as F
     from .train import load_prefixes, forward_prefix
     from .carrier import Carrier
@@ -160,7 +167,7 @@ def main():
                 out.append({"commit": c.detach(), "ask": None if q is None else q.detach()})
         learned[name] = out
     F.ABLATION.clear()
-    rules = ["never", "disagreement_first", "max_uncertainty", "fixed_order", "voi_det"] + [f"learned:{n}" for n in learned] + [f"learnedord:{n}" for n in learned]
+    rules = ["never", "disagreement_first", "max_uncertainty", "fixed_order", "voi_det"] + [f"learned:{n}" for n in learned] + [f"learnedord:{n}" for n in learned] + [f"learnedvoi:{n}" for n in learned]
     # question categories from labels: for each menu question, does asking beat the best commit?
     cat = collections.Counter()
     per_rule = {r: collections.defaultdict(list) for r in rules}

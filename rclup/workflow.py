@@ -124,6 +124,34 @@ class FixedOrderController(Controller):
         return Decision("commit", ctx.greedy_index())
 
 
+def voi_values(ctx: "ReceiverContext") -> list[float]:
+    """Decision-relevance value of information per menu question (deterministic, no learning). Group questions (v6):
+    train-prior gain minus the budget cost of a turn; other questions: support mass of alternatives that both differ on the
+    asked field and change the downstream outcome signature (plus residual mass when the greedy value is unknown)."""
+    sig = ctx.aux.get("signature", {})
+    fv = ctx.aux.get("field_value", {})
+    pk = ctx.incoming[0]
+    greedy = pk.greedy
+    gains = []
+    for q in ctx.menu:
+        if q.scope.get("pairs") is not None:
+            cost = ctx.aux.get("p_fallback", 0.0) if (ctx.external_left - 1) < T_FB else 0.0
+            gains.append(ctx.aux.get("prior", {}).get(q.qid, 0.0) - cost)
+            continue
+        g_sig = sig.get(greedy.key)
+        g_val = fv.get((greedy.key, q.qid))
+        value = 0.0
+        for c in pk.candidates:
+            if c.is_unresolved or c.key == greedy.key:
+                continue
+            if fv.get((c.key, q.qid)) != g_val and sig.get(c.key) != g_sig:
+                value += c.weight
+        if g_val == "unknown":
+            value += pk.residual_weight
+        gains.append(value)
+    return gains
+
+
 class VOIController(Controller):
     """Decision-relevance value of information (deterministic, no learning): a question is worth asking only if the
     interpretations it separates lead to different downstream outcomes (search results / rule verdicts). Value = support
@@ -131,30 +159,7 @@ class VOIController(Controller):
     name = "voi_det"
 
     def decide(self, ctx):
-        sig = ctx.aux.get("signature", {})
-        fv = ctx.aux.get("field_value", {})
-        pk = ctx.incoming[0]
-        greedy = pk.greedy
-        gains = []
-        for q in ctx.menu:
-            g_sig = sig.get(greedy.key)
-            g_val = fv.get((greedy.key, q.qid))
-            value = 0.0
-            if q.scope.get("pairs") is not None:
-                # budget-aware VOI (train priors, no learning): gain = P(the asked fields are real constraints); cost = P(a fallback
-                # search will be needed) charged only when, after this question, the remaining turns could no longer cover the
-                # fallback path (search, relaxation question, re-search, final = T_FB turns)
-                cost = ctx.aux.get("p_fallback", 0.0) if (ctx.external_left - 1) < T_FB else 0.0
-                gains.append(ctx.aux.get("prior", {}).get(q.qid, 0.0) - cost)
-                continue
-            for c in pk.candidates:
-                if c.is_unresolved or c.key == greedy.key:
-                    continue
-                if fv.get((c.key, q.qid)) != g_val and sig.get(c.key) != g_sig:
-                    value += c.weight
-            if g_val == "unknown":
-                value += pk.residual_weight   # the greedy program itself cannot be executed without this fact
-            gains.append(value)   # a contradiction question has value only if its alternatives change the outcome (none when the stated fact is already used)
+        gains = voi_values(ctx)
         if ctx.menu and ctx.items_left > 0 and gains and max(gains) > 0:
             i = max(range(len(gains)), key=lambda k: gains[k])
             return Decision("ask", question=ctx.menu[i], scores={"voi": gains})

@@ -262,11 +262,19 @@ class RCLUPController:
             if groups:
                 first = min(groups, key=lambda i: order.get(ctx.menu[i].qid, 10 ** 6))
                 eligible = {i for i in range(len(ctx.menu)) if i not in groups or i == first}
+        # hybrid (RCLUP_VOI_BETA=b): decision score = (1-b) * learned gain + b * deterministic value of information
+        beta = float(os.environ.get("RCLUP_VOI_BETA", "0") or 0)
+        voi = None
+        if beta > 0 and ctx.menu and ctx.aux:
+            from .workflow import voi_values
+            voi = voi_values(ctx)
         if ctx.menu and sc["question_logits"].numel():
             r_ask = self._risk(sc["question_logits"], [f"{ctx.role}|ask"] * len(ctx.menu))
             gains = []
             for i, (q, r) in enumerate(zip(ctx.menu, r_ask.tolist())):
                 g = float(r_commit[b_star]) - r - self.lam * q.items
+                if voi is not None:
+                    g = (1.0 - beta) * g + beta * voi[i]
                 gains.append(g)
                 if i in eligible and q.items <= ctx.items_left and ctx.external_left > self.reserve and g > best_gain:
                     best_q, best_gain = q, g
