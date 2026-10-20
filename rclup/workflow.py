@@ -166,6 +166,30 @@ class VOIController(Controller):
         return Decision("commit", ctx.greedy_index(), scores={"voi": gains})
 
 
+class MyopicVOIController(Controller):
+    """Literature-style myopic value of information (no learning, no budget model): ask the question with the largest
+    probability of changing the decision while any is positive -- for an unknown field, the train prior that it is a real
+    constraint; for a disagreement, the support mass of alternatives that change the outcome. Never reasons about the
+    remaining turn budget."""
+    name = "voi_myopic"
+
+    def decide(self, ctx):
+        gains = []
+        for q in ctx.menu:
+            if q.scope.get("pairs") is not None:
+                gains.append(ctx.aux.get("prior", {}).get(q.qid, 0.0))
+            else:
+                sig, fv, pk = ctx.aux.get("signature", {}), ctx.aux.get("field_value", {}), ctx.incoming[0]
+                g_sig, g_val = sig.get(pk.greedy.key), fv.get((pk.greedy.key, q.qid))
+                v = sum(c.weight for c in pk.candidates if not c.is_unresolved and c.key != pk.greedy.key
+                        and fv.get((c.key, q.qid)) != g_val and sig.get(c.key) != g_sig)
+                gains.append(v + (pk.residual_weight if g_val == "unknown" else 0.0))
+        if ctx.menu and ctx.items_left > 0 and gains and max(gains) > 0:
+            i = max(range(len(gains)), key=lambda k: gains[k])
+            return Decision("ask", question=ctx.menu[i], scores={"voi_myopic": gains})
+        return Decision("commit", ctx.greedy_index(), scores={"voi_myopic": gains})
+
+
 class RoundRobinMenuController(Controller):
     """Prefix-generation policy (App. B.1): round-robin over the menu up to the budget, then pi_0 commit."""
     name = "round_robin_menu"

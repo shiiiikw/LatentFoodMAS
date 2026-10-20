@@ -19,7 +19,7 @@ from .backbone import VLLMClient
 from .common import DATA, RUNS, append_jsonl, read_jsonl, write_json
 from .cost import BudgetExceeded, CostLedger
 from .workflow import (DisagreementController, FixedOrderController, GreedyController, HoosierWorkflow, MaxUncertaintyController,
-                       NGQAWorkflow, Pi0Controller, VOIController)
+                       MyopicVOIController, NGQAWorkflow, Pi0Controller, VOIController)
 
 CONTROLLERS = {
     "text_mas": lambda seed: GreedyController(),
@@ -28,6 +28,7 @@ CONTROLLERS = {
     "max_uncertainty": lambda seed: MaxUncertaintyController(),
     "fixed_order": lambda seed: FixedOrderController(),
     "voi_det": lambda seed: VOIController(),
+    "voi_myopic": lambda seed: MyopicVOIController(),
 }
 LEARNED = ("rclup", "rich_text_mc", "generic_latent_mc", "rclup_q_ref", "scalar_mc")
 
